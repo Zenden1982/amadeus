@@ -1416,7 +1416,7 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
         })
         .response;
     let size = s.size.map(|(w, h)| format!("{w}×{h}")).unwrap_or_else(|| "—".into());
-    let enc = s.encoder.clone().unwrap_or_else(|| "определяется…".into());
+    let enc = s.backend.clone();
     let lim = s.limitation.as_deref().map(|l| format!("
 Ограничение качества: {l}")).unwrap_or_default();
     resp.on_hover_text(format!("В эфире: {}

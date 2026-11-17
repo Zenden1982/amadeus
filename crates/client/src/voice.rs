@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use capture_win::{Capture, Event as CapEvent, SourceId};
+use capture_win::{Event as CapEvent, SourceId};
 use livekit::options::{AudioEncoding, TrackPublishOptions};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::prelude::*;
@@ -109,7 +109,9 @@ pub struct StreamInfo {
     pub minimized: bool,
     /// Размер отправляемого видео.
     pub size: Option<(u32, u32)>,
-    /// Из статистики WebRTC: реализация энкодера (OpenH264, NVENC…), к/с, кбит/с, ограничение качества.
+    /// Чем кодируется: «NVIDIA H.264 Encoder MFT (видеокарта)» / «OpenH264 (процессор)».
+    pub backend: String,
+    /// Из статистики WebRTC: реализация энкодера, к/с, кбит/с, ограничение качества.
     pub encoder: Option<String>,
     pub fps: f64,
     pub kbps: f64,
@@ -234,9 +236,11 @@ struct Engine {
 /// Идущая трансляция. Захват и источник живут дольше публикации: при переподключении
 /// трек публикуется заново в новую комнату из того же источника.
 struct Streaming {
-    capture: Option<Capture>,
+    capture: Option<stream::AnyCapture>,
     source: NativeVideoSource,
     preset: Preset,
+    /// Аппаратный путь (pre-encoded H.264).
+    hw: bool,
     publication: Option<LocalTrackPublication>,
 }
 
@@ -560,7 +564,7 @@ impl Engine {
         }
         // Переподключение во время трансляции: тот же источник — в новую комнату.
         if let Some(st) = &mut self.stream {
-            match stream::publish(&room, &st.source, st.preset).await {
+            match stream::publish(&room, &st.source, st.preset, st.hw).await {
                 Ok(p) => st.publication = Some(p),
                 Err(e) => log::error!("повторная публикация трансляции: {e}"),
             }
@@ -713,7 +717,9 @@ impl Engine {
         let Ok(stats) = room.get_stats().await else { return };
         self.stats_n += 1;
         self.update_video_stats(&stats.publisher_stats);
+        // Одна PeerConnection на всё (LiveKit 1.13) — входящие тоже в publisher_stats.
         self.log_inbound_video(&stats.subscriber_stats);
+        self.log_inbound_video(&stats.publisher_stats);
         let rtt = stats
             .publisher_stats
             .iter()
@@ -733,12 +739,6 @@ impl Engine {
 
     // ---------------------------------------------------------------- трансляция
 
-    fn start_capture(&mut self, source: SourceId, preset: Preset, video: &NativeVideoSource) -> Result<Capture, String> {
-        self.generation += 1;
-        self.last_video_bytes = None;
-        Capture::start(source, preset.config(), stream::sink(video, self.generation, &self.cap_tx))
-    }
-
     async fn start_stream(&mut self, source: SourceId, title: String, width: u32, height: u32, preset: Preset) {
         if self.room.is_none() {
             return;
@@ -750,8 +750,10 @@ impl Engine {
                 if let Some(c) = st.capture.take() {
                     tokio::task::block_in_place(|| c.stop());
                 }
-                let video = st.source.clone();
-                match self.start_capture(source, preset, &video) {
+                self.generation += 1;
+                self.last_video_bytes = None;
+                let r = tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, st.hw, self.generation, &self.cap_tx));
+                match r {
                     Ok(c) => {
                         st.capture = Some(c);
                         self.stream = Some(st);
@@ -764,22 +766,22 @@ impl Engine {
                                 info.size = None;
                             }
                         });
+                        return;
                     }
                     Err(e) => {
-                        self.stream = Some(st);
-                        self.stop_stream().await;
-                        self.set(|s| s.stream_notice = Some(e));
+                        // Например, аппаратный энкодер не поднялся на новом источнике — начинаем заново.
+                        log::warn!("смена источника на лету: {e} — перезапуск трансляции");
                     }
                 }
-                return;
             }
             self.stream = Some(st);
             self.stop_stream().await;
         }
 
-        let video = stream::new_source(width, height, preset);
-        let capture = match self.start_capture(source, preset, &video) {
-            Ok(c) => c,
+        self.generation += 1;
+        self.last_video_bytes = None;
+        let started = match tokio::task::block_in_place(|| stream::start(source, width, height, preset, self.generation, &self.cap_tx)) {
+            Ok(s) => s,
             Err(e) => {
                 log::error!("трансляция: {e}");
                 self.set(|s| s.stream_notice = Some(e));
@@ -787,17 +789,24 @@ impl Engine {
             }
         };
         let Some((room, _)) = &self.room else { return };
-        let publication = match stream::publish(room, &video, preset).await {
+        let publication = match stream::publish(room, &started.video, preset, started.hw).await {
             Ok(p) => p,
             Err(e) => {
                 log::error!("публикация трансляции: {e}");
-                tokio::task::block_in_place(|| capture.stop());
+                tokio::task::block_in_place(|| started.capture.stop());
                 self.set(|s| s.stream_notice = Some(format!("Не удалось начать трансляцию: {e}")));
                 return;
             }
         };
-        log::info!("трансляция: {source:?} «{title}», {preset:?}");
-        self.stream = Some(Streaming { capture: Some(capture), source: video, preset, publication: Some(publication) });
+        log::info!("трансляция: {source:?} «{title}», {preset:?}, энкодер {}", started.encoder);
+        let backend = started.encoder.clone();
+        self.stream = Some(Streaming {
+            capture: Some(started.capture),
+            source: started.video,
+            preset,
+            hw: started.hw,
+            publication: Some(publication),
+        });
         self.set(|s| {
             s.stream = Some(StreamInfo {
                 source,
@@ -805,6 +814,7 @@ impl Engine {
                 preset,
                 minimized: false,
                 size: None,
+                backend,
                 encoder: None,
                 fps: 0.0,
                 kbps: 0.0,
@@ -861,17 +871,24 @@ impl Engine {
         if !self.stats_n.is_multiple_of(5) {
             return;
         }
+        log::debug!("subscriber stats: {} записей, inbound: {}", stats.len(), stats.iter().filter(|s| matches!(s, RtcStats::InboundRtp(_))).count());
         for s in stats {
             if let RtcStats::InboundRtp(i) = s
                 && i.stream.kind == "video" {
                     log::info!(
-                        "входящее видео: декодер {:?}, {}×{} {:.0} к/с, кадров {}, потеряно пакетов {}",
+                        "входящее видео: декодер {:?}, {}×{} {:.0} к/с, кадров {} (ключевых {}, выброшено {}), потеряно пакетов {} из {}, NACK {}, PLI {}, заморозок {}",
                         i.inbound.decoder_implementation,
                         i.inbound.frame_width,
                         i.inbound.frame_height,
                         i.inbound.frames_per_second,
                         i.inbound.frames_decoded,
-                        i.received.packets_lost
+                        i.inbound.key_frames_decoded,
+                        i.inbound.frames_dropped,
+                        i.received.packets_lost,
+                        i.received.packets_received,
+                        i.inbound.nack_count,
+                        i.inbound.pli_count,
+                        i.inbound.freeze_count
                     );
                 }
         }
@@ -889,7 +906,14 @@ impl Engine {
             return;
         };
         let now = Instant::now();
-        let bytes = o.sent.bytes_sent;
+        // Байты — по всем исходящим видеопотокам (после смены пресета старый поток может ещё числиться).
+        let bytes: u64 = stats
+            .iter()
+            .filter_map(|s| match s {
+                RtcStats::OutboundRtp(o) if o.stream.kind == "video" => Some(o.sent.bytes_sent),
+                _ => None,
+            })
+            .sum();
         let kbps = match self.last_video_bytes {
             Some((b, t)) if bytes >= b => (bytes - b) as f64 * 8.0 / 1000.0 / now.duration_since(t).as_secs_f64().max(0.001),
             _ => 0.0,
@@ -898,6 +922,10 @@ impl Engine {
         let enc = o.outbound.encoder_implementation.clone();
         let fps = o.outbound.frames_per_second;
         let lim = format!("{:?}", o.outbound.quality_limitation_reason);
+        let loss = stats.iter().find_map(|s| match s {
+            RtcStats::RemoteInboundRtp(r) if r.stream.kind == "video" => Some(r.remote_inbound.fraction_lost),
+            _ => None,
+        });
         let enc_ms = if o.outbound.frames_encoded > 0 {
             o.outbound.total_encode_time * 1000.0 / o.outbound.frames_encoded as f64
         } else {
@@ -905,9 +933,13 @@ impl Engine {
         };
         if self.stats_n % 5 == 1 {
             log::info!(
-                "видео: энкодер {enc:?}, {}×{} {fps:.0} к/с, {kbps:.0} кбит/с, кодирование {enc_ms:.1} мс/кадр, ограничение {lim}",
+                "видео: энкодер {enc:?}, {}×{} {fps:.0} к/с, {kbps:.0} кбит/с, цель {:.0} кбит/с, кодирование {enc_ms:.1} мс/кадр, ограничение {lim}, NACK {}, PLI {}, потери у SFU {:?}",
                 o.outbound.frame_width,
-                o.outbound.frame_height
+                o.outbound.frame_height,
+                o.outbound.target_bitrate / 1000.0,
+                o.outbound.nack_count,
+                o.outbound.pli_count,
+                loss
             );
         }
         self.set(|s| {

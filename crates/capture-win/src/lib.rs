@@ -10,6 +10,7 @@
 use msvc_shim as _;
 
 pub mod capture;
+pub mod hw;
 pub mod sources;
 
 pub use capture::{Capture, CaptureConfig, Event, Sink};

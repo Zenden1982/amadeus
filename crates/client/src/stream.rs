@@ -2,10 +2,13 @@
 
 use std::sync::Arc;
 
-use capture_win::{CaptureConfig, Event, I420Buffer, Sink};
-use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
+use capture_win::hw::{EncodedSink, HwCapture};
+use capture_win::{Capture, CaptureConfig, Event, I420Buffer, Sink, SourceId};
+use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoderBackend, VideoEncoding};
 use livekit::prelude::*;
-use livekit::webrtc::video_frame::{VideoBuffer, VideoFrame, VideoRotation};
+use livekit::webrtc::video_frame::{
+    EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame, VideoBuffer, VideoFrame, VideoRotation,
+};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use serde::{Deserialize, Serialize};
@@ -103,12 +106,14 @@ pub fn new_source(width: u32, height: u32, preset: Preset) -> NativeVideoSource 
     )
 }
 
-pub async fn publish(room: &Room, source: &NativeVideoSource, preset: Preset) -> RoomResult<LocalTrackPublication> {
+pub async fn publish(room: &Room, source: &NativeVideoSource, preset: Preset, hw: bool) -> RoomResult<LocalTrackPublication> {
     let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
     let opts = TrackPublishOptions {
         source: TrackSource::Screenshare,
         video_codec: VideoCodec::H264,
         simulcast: false,
+        // Аппаратный путь: H.264 уже закодирован видеокартой, WebRTC только пакетирует.
+        video_encoder: if hw { VideoEncoderBackend::PreEncoded } else { VideoEncoderBackend::Auto },
         video_encoding: Some(VideoEncoding { max_bitrate: preset.max_bitrate(), max_framerate: preset.config().fps as f64 }),
         ..Default::default()
     };
@@ -119,3 +124,116 @@ pub fn sink(source: &NativeVideoSource, generation: u64, events: &mpsc::Unbounde
     Arc::new(LkSink { source: source.clone(), generation, events: events.clone() })
 }
 
+/// Приёмник готового H.264 с видеокарты → NativeVideoSource (pre-encoded).
+pub struct LkEncodedSink {
+    pub source: NativeVideoSource,
+    pub generation: u64,
+    pub events: mpsc::UnboundedSender<CaptureEvent>,
+}
+
+impl EncodedSink for LkEncodedSink {
+    fn encoded(&self, data: &[u8], keyframe: bool, timestamp_us: i64, width: u32, height: u32) {
+        let f = EncodedVideoFrame {
+            codec: EncodedVideoCodec::H264,
+            payload: data,
+            timestamp_us,
+            frame_type: if keyframe { EncodedFrameType::Key } else { EncodedFrameType::Delta },
+            resolution: VideoResolution { width, height },
+            frame_metadata: None,
+        };
+        self.source.capture_encoded_frame(&f);
+    }
+
+    fn take_keyframe_request(&self) -> bool {
+        self.source.take_keyframe_request()
+    }
+
+    fn take_bitrate_request(&self) -> Option<u32> {
+        self.source.take_rate_control_request().map(|r| r.target_bitrate_bps.min(u32::MAX as u64) as u32)
+    }
+
+    fn event(&self, event: Event) {
+        let _ = self.events.send(CaptureEvent { generation: self.generation, event });
+    }
+}
+
+/// Идущий захват: аппаратный (видеокарта кодирует сама) или программный (кадры I420 → OpenH264 в WebRTC).
+pub enum AnyCapture {
+    Cpu(Capture),
+    Hw(HwCapture),
+}
+
+impl AnyCapture {
+    pub fn stop(self) {
+        match self {
+            AnyCapture::Cpu(c) => c.stop(),
+            AnyCapture::Hw(c) => c.stop(),
+        }
+    }
+}
+
+pub struct Started {
+    pub capture: AnyCapture,
+    pub video: NativeVideoSource,
+    pub hw: bool,
+    /// Для интерфейса: «NVIDIA H.264 Encoder MFT (видеокарта)» / «OpenH264 (процессор)».
+    pub encoder: String,
+}
+
+/// `AMADEUS_NO_HW=1` — принудительно программное кодирование (диагностика).
+pub fn hw_allowed() -> bool {
+    std::env::var_os("AMADEUS_NO_HW").is_none()
+}
+
+/// Новый захват с новым источником видео: сначала видеокарта, если нельзя — процессор.
+pub fn start(
+    id: SourceId,
+    width: u32,
+    height: u32,
+    preset: Preset,
+    generation: u64,
+    events: &mpsc::UnboundedSender<CaptureEvent>,
+) -> Result<Started, String> {
+    if hw_allowed() {
+        let cfg = preset.config();
+        let (w, h) = capture_win::capture::target_size(width.max(2), height.max(2), &cfg);
+        let video = NativeVideoSource::new_encoded(VideoResolution { width: w, height: h });
+        match start_hw(id, preset, &video, generation, events) {
+            Ok(c) => {
+                let encoder = format!("{} (видеокарта)", c.encoder_name);
+                return Ok(Started { capture: AnyCapture::Hw(c), video, hw: true, encoder });
+            }
+            Err(e) => log::warn!("аппаратное кодирование недоступно: {e} — кодирует процессор"),
+        }
+    }
+    let video = new_source(width, height, preset);
+    let c = Capture::start(id, preset.config(), sink(&video, generation, events))?;
+    Ok(Started { capture: AnyCapture::Cpu(c), video, hw: false, encoder: "OpenH264 (процессор)".into() })
+}
+
+fn start_hw(
+    id: SourceId,
+    preset: Preset,
+    video: &NativeVideoSource,
+    generation: u64,
+    events: &mpsc::UnboundedSender<CaptureEvent>,
+) -> Result<HwCapture, String> {
+    let sink = Arc::new(LkEncodedSink { source: video.clone(), generation, events: events.clone() });
+    HwCapture::start(id, preset.config(), preset.max_bitrate() as u32, sink)
+}
+
+/// Смена источника в уже опубликованный трек (тот же вид кодирования).
+pub fn restart(
+    id: SourceId,
+    preset: Preset,
+    video: &NativeVideoSource,
+    hw: bool,
+    generation: u64,
+    events: &mpsc::UnboundedSender<CaptureEvent>,
+) -> Result<AnyCapture, String> {
+    if hw {
+        start_hw(id, preset, video, generation, events).map(AnyCapture::Hw)
+    } else {
+        Capture::start(id, preset.config(), sink(video, generation, events)).map(AnyCapture::Cpu)
+    }
+}
