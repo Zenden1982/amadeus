@@ -43,11 +43,41 @@ CADDY_SERVE_API=0               # API живёт на другом хосте
 PROXY protocol от прокси принимается (только с 127.0.0.1) — LiveKit/TURN видят настоящие IP клиентов. Без него тоже работает.
 
 ## Бэкенд отдельно (за своим reverse proxy)
-`COMPOSE_PROFILES=backend`, `BACKEND_BIND=0.0.0.0:8080` (или адрес, доступный прокси), в прокси — `api.` → этот адрес (WebSocket включить).
+`COMPOSE_PROFILES=backend`, `CADDY_SERVE_API=0`, `BACKEND_BIND=0.0.0.0:8080` (или адрес, доступный прокси),
+`TRUSTED_PROXY_HOPS=1`; в прокси — `api.` → этот адрес (WebSocket включить). Прокси должен дописывать
+`X-Forwarded-For` с настоящим IP клиента (иначе rate limit будет общим на всех).
+
+## Бэкенд: первый запуск
+```sh
+cd deploy
+docker compose run --rm -it backend create-admin --name <ник>     # пароль спросит (или ADMIN_PASSWORD=…)
+docker compose run --rm backend create-invite --uses 1 --hours 168 # инвайт-код для друга
+```
+Остальное (каналы, инвайты, отзыв) — через API от имени админа (позже — из клиента).
+База — SQLite в `/data/app.db` (том `backend-data` или папка хоста `BACKEND_DATA`).
+Резервная копия на ходу (согласованный снимок через `VACUUM INTO`, контейнер не останавливать):
+```sh
+docker compose exec -T backend backend backup /data/backup/app.db   # файл появится в томе/папке данных
+```
+
+### API (кратко, JSON, `Authorization: Bearer <token>`)
+| Метод | Путь | Кто | Что |
+|---|---|---|---|
+| GET | `/health` | все | версия |
+| POST | `/auth/register` | все | `{invite_code, name, password}` → сессия (только по инвайту) |
+| POST | `/auth/login` / `/auth/logout` | все / пользователь | сессия 30 дней |
+| GET | `/me` | пользователь | кто я |
+| GET / POST | `/channels` | пользователь / админ | список / создать `{name, kind: voice\|text}` |
+| DELETE | `/channels/{id}` | админ | удалить |
+| POST | `/channels/{id}/join` | пользователь | `{livekit_url, livekit_token, room}` (токен на 6 ч) |
+| GET / POST | `/invites` | админ | список / создать `{uses?, expires_in_hours?}` (по умолчанию 1 раз, 7 дней; 0 ч — бессрочно) |
+| DELETE | `/invites/{code}` | админ | отозвать |
+
+Rate limit: 10 попыток входа/регистрации за 5 минут с одного IP (ответ 429 + `Retry-After`).
 
 ## Сервер без доступа к Docker Hub / crates.io
 - Прокси для сборки: раскомментировать `HTTP_PROXY/HTTPS_PROXY` в `.env` (передаются как build-args).
-- Или перенести образы готовыми: `docker compose build caddy` на своём ПК, затем `docker save livekit/livekit-server:v1.13.11 svoy-discord/caddy-l4:2.11.9 | ssh host docker load`.
+- Или перенести образы готовыми: `docker compose build caddy` на своём ПК, затем `docker save livekit/livekit-server:v1.13.11 amadeus/caddy-l4:2.11.9 | ssh host docker load`.
 
 ## Проверка
 ```sh

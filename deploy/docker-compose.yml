@@ -1,6 +1,6 @@
-# Свой Discord — серверная часть. Настройка — только через deploy/.env (см. .env.example).
+# Amadeus — серверная часть. Настройка — только через deploy/.env (см. .env.example).
 # Запуск: sh deploy/up.sh   (render.sh + docker compose up -d)
-name: svoy-discord
+name: amadeus
 
 services:
   livekit:
@@ -17,7 +17,7 @@ services:
     build:
       context: ./caddy             # Caddy + layer4 (TLS по SNI для wss и TURN/TLS), см. caddy/Dockerfile
       args: [HTTP_PROXY, HTTPS_PROXY]
-    image: svoy-discord/caddy-l4:2.11.9
+    image: amadeus/caddy-l4:2.11.9
     command: run --config /etc/caddy.json
     network_mode: host
     restart: unless-stopped
@@ -31,15 +31,18 @@ services:
       context: ..
       dockerfile: crates/backend/Dockerfile
       args: [HTTP_PROXY, HTTPS_PROXY, NO_PROXY]
-    image: svoy-discord/backend:latest
+    image: amadeus/backend:latest
     restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: sqlite:///data/app.db
+      BIND_ADDR: 0.0.0.0:8080
+      # Caddy (standalone) отдаёт API сырым TCP с заголовком PROXY v2 — бэкенд должен его ждать
+      PROXY_PROTOCOL: ${CADDY_SERVE_API:-0}
     ports:
       - "${BACKEND_BIND:-127.0.0.1:8080}:8080"
     volumes:
-      - backend-data:/data
+      - ${BACKEND_DATA:-backend-data}:/data   # том или папка хоста (владелец — uid 10001)
     extra_hosts: ["host.docker.internal:host-gateway"]
 
 volumes:
