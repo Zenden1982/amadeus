@@ -518,6 +518,7 @@ impl Engine {
             RoomEvent::TrackSubscribed { track, participant, .. } => {
                 if let RemoteTrack::Audio(a) = track {
                     let v = self.volume_for(participant.identity().as_str());
+                    log::info!("подписка на аудио {} (громкость {v})", participant.identity());
                     a.rtc_track().set_volume(v as f64);
                 }
                 self.refresh_peers(false);
@@ -592,6 +593,7 @@ impl Engine {
             })
             .reduce(f64::min);
         if rtt.is_some() {
+            log::debug!("rtt {rtt:?}");
             self.set(|s| s.rtt = rtt);
         }
     }

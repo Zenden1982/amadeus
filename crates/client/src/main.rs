@@ -4,6 +4,7 @@
 mod api;
 mod app;
 mod config;
+mod mictest;
 mod msvc_shim;
 mod ptt;
 mod sounds;

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,9 +15,13 @@ use proto::{AuthResponse, Channel, ChannelKind, Invite, User};
 
 use crate::api::{self, Api, ApiError, ApiResult};
 use crate::config::Settings;
+use crate::mictest::{self, MicTest};
 use crate::ptt::{self, Ptt};
 use crate::theme::{self as t, DockStyle};
 use crate::voice::{self, AudioPrefs, Cmd, Conn, Peer, VoiceHandle, VoiceState};
+
+/// (микрофон, вывод, шумоподавление, автогромкость, слышать себя).
+type MicTestKey = (Option<String>, Option<String>, bool, bool, bool);
 
 const CHANNELS_REFRESH: Duration = Duration::from_secs(60);
 
@@ -79,6 +84,12 @@ pub struct App {
     popup: Option<VolumePopup>,
     invite: Option<Result<Invite, String>>,
     invite_busy: bool,
+    mic_test: Option<MicTest>,
+    /// Параметры, с которыми запущена проверка: (микрофон, вывод, ns, agc, слышать себя).
+    mic_test_key: Option<MicTestKey>,
+    mic_test_error: Option<String>,
+    mic_level: Arc<AtomicU32>,
+    mic_playback: bool,
 }
 
 impl App {
@@ -141,6 +152,11 @@ impl App {
             popup: None,
             invite: None,
             invite_busy: false,
+            mic_test: None,
+            mic_test_key: None,
+            mic_test_error: None,
+            mic_level: Arc::new(AtomicU32::new(0)),
+            mic_playback: false,
         };
         if has_token {
             app.fetch_me();
@@ -267,6 +283,7 @@ impl App {
         self.me = None;
         self.channels.clear();
         self.settings_open = false;
+        self.stop_mic_test();
         self.popup = None;
         self.invite = None;
         self.login.tab = Tab::Login;
@@ -867,6 +884,44 @@ impl App {
 
     // ------------------------------------------------------------ настройки
 
+    /// Держит проверку микрофона в актуальном состоянии, пока открыты настройки.
+    fn sync_mic_test(&mut self, vs: &VoiceState) {
+        let name_of = |id: &Option<String>, list: &[voice::Device]| {
+            id.as_ref().and_then(|id| list.iter().find(|d| &d.id == id).map(|d| d.name.clone()))
+        };
+        let key = (
+            name_of(&self.settings.input_device, &vs.inputs),
+            name_of(&self.settings.output_device, &vs.outputs),
+            self.settings.noise_suppression,
+            self.settings.auto_gain,
+            self.mic_playback,
+        );
+        if self.mic_test_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.mic_test = None; // сначала закрыть старые потоки
+        self.mic_level.store(0, Ordering::Relaxed);
+        match mictest::start(key.0.as_deref(), key.1.as_deref(), key.2, key.3, key.4, self.mic_level.clone()) {
+            Ok(t) => {
+                self.mic_test = Some(t);
+                self.mic_test_error = None;
+            }
+            Err(e) => {
+                log::warn!("проверка микрофона: {e}");
+                self.mic_test_error = Some(e);
+                self.mic_playback = false;
+            }
+        }
+        self.mic_test_key = Some(key);
+    }
+
+    fn stop_mic_test(&mut self) {
+        self.mic_test = None;
+        self.mic_test_key = None;
+        self.mic_playback = false;
+        self.mic_level.store(0, Ordering::Relaxed);
+    }
+
     fn open_settings(&mut self) {
         self.settings_open = true;
         self.invite = None;
@@ -874,6 +929,8 @@ impl App {
     }
 
     fn ui_settings(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        self.sync_mic_test(vs);
+        ui.ctx().request_repaint_after(Duration::from_millis(50)); // живой индикатор уровня
         let mut close = false;
         let modal = egui::Modal::new(Id::new("settings"))
             .backdrop_color(Color32::from_rgba_unmultiplied(10, 8, 6, 185))
@@ -902,8 +959,31 @@ impl App {
                         self.settings.save();
                         self.voice.send(Cmd::SetInputDevice(input));
                     }
-                    let level = vs.peers.iter().find(|p| p.is_local).map(|p| p.level);
+                    let level = if self.mic_test.is_some() {
+                        Some(f32::from_bits(self.mic_level.load(Ordering::Relaxed)))
+                    } else {
+                        vs.peers.iter().find(|p| p.is_local).map(|p| p.level)
+                    };
                     level_meter(ui, level, w);
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let (text, active) = if self.mic_playback {
+                            (format!("{}  Остановить проверку", ph::STOP), true)
+                        } else {
+                            (format!("{}  Слышать себя", ph::HEADPHONES), false)
+                        };
+                        let btn = egui::Button::new(RichText::new(text).color(if active { t::ON_NIXIE } else { t::PAPER }))
+                            .fill(if active { t::NIXIE } else { t::BAKELITE_2 });
+                        if ui.add(btn).clicked() {
+                            self.mic_playback = !self.mic_playback;
+                        }
+                        let hint = match &self.mic_test_error {
+                            Some(e) => RichText::new(format!("Проверка недоступна: {e}")).color(t::ERR_TEXT),
+                            None if self.mic_playback => RichText::new("Так вас слышат друзья. Наденьте наушники — на колонках будет заводка.").color(t::DUST),
+                            None => RichText::new("Голос с шумоподавлением, как в звонке. Лучше в наушниках.").color(t::DUST),
+                        };
+                        ui.label(hint.size(12.5));
+                    });
                     ui.add_space(12.0);
 
                     label(ui, "Вывод звука");
@@ -1027,6 +1107,7 @@ impl App {
         if close || modal.should_close() {
             self.ptt.cancel_capture();
             self.settings_open = false;
+            self.stop_mic_test();
         }
     }
 }
@@ -1216,9 +1297,6 @@ fn level_meter(ui: &mut Ui, level: Option<f32>, w: f32) {
         } else {
             p.rect_filled(r, CornerRadius::same(2), Color32::from_rgb(0x2D, 0x25, 0x1E));
         }
-    }
-    if level.is_none() {
-        ui.label(RichText::new("Уровень микрофона виден, когда вы в канале.").size(12.0).color(t::DUST));
     }
 }
 
