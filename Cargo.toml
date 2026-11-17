@@ -1,8 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/proto", "crates/backend"]
+members = ["crates/proto", "crates/backend", "crates/client"]
 
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
 publish = false
+
+# Патч WebRTC: громкость удалённого аудиотрека (AudioTrackInterface::SetVolume). См. vendor/PATCHES.md.
+[patch.crates-io]
+webrtc-sys = { path = "vendor/webrtc-sys" }
+libwebrtc = { path = "vendor/libwebrtc" }

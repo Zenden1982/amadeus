@@ -1,0 +1,8 @@
+# webrtc-sys компилируется с -DNTDDI_VERSION=NTDDI_WIN11_GE, а этот макрос есть только в Windows SDK 10.0.26100+.
+# На ПК стоит SDK 10.0.22621 — определяем значение сами (как в SDK 26100). Можно убрать после установки SDK 26100.
+[env]
+CXXFLAGS = "-DNTDDI_WIN11_GE=0x0A000010"
+
+# Предкомпилированный libwebrtc (LiveKit) собран со статическим CRT (/MT) — иначе LNK2038/LNK2005.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
