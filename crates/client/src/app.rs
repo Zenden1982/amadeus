@@ -1410,6 +1410,9 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
                 } else if s.fps > 0.0 {
                     ui.label(RichText::new(format!("{:.0} к/с · {:.1} Мбит/с", s.fps, s.kbps / 1000.0)).size(12.5).color(t::DUST));
                 }
+                // Чем кодируется — видно сразу, без наведения.
+                let (tag, color) = if s.backend.contains("видеокарта") { ("видеокарта", t::NIXIE) } else { ("процессор", t::DUST) };
+                ui.label(RichText::new(tag).size(12.0).color(color));
                 ui.label(RichText::new(&title).font(t::semibold(13.0)).color(t::FILAMENT));
                 ui.label(RichText::new(egui_phosphor::fill::MONITOR_ARROW_UP).font(t::icon_fill(15.0)).color(t::NIXIE));
             });
