@@ -1,0 +1,6 @@
+.tools/
+target/
+.env
+*.env
+!.env.example
+deploy/generated/

@@ -1,0 +1,101 @@
+#!/bin/sh
+# Генерирует deploy/generated/{livekit.yaml,caddy.json} из deploy/.env.
+# Запуск: sh deploy/render.sh   (вызывается и из deploy/up.sh)
+set -eu
+cd "$(dirname "$0")"
+[ -f .env ] || { echo "нет deploy/.env — скопируйте .env.example и запустите scripts/gen-keys.sh" >&2; exit 1; }
+set -a; . ./.env; set +a
+
+: "${LK_DOMAIN:?}" "${TURN_DOMAIN:?}"
+: "${LK_TCP_PORT:=7881}" "${LK_UDP_PORT:=7882}" "${TURN_UDP_PORT:=3478}"
+: "${CADDY_LISTEN:=:443}" "${CADDY_SERVE_API:=0}" "${LK_MAX_PARTICIPANTS:=20}" "${ACME_EMAIL:=}"
+: "${BACKEND_BIND:=127.0.0.1:8080}"
+TURN_TLS_INTERNAL=5349   # только loopback: сюда Caddy отдаёт расшифрованный TURN/TLS
+
+[ -n "${LIVEKIT_API_KEY:-}" ] && [ -n "${LIVEKIT_API_SECRET:-}" ] || {
+  echo "LIVEKIT_API_KEY/SECRET пусты — запустите scripts/gen-keys.sh" >&2; exit 1; }
+
+mkdir -p generated
+umask 077
+
+# ── LiveKit ──
+if [ -n "${PUBLIC_IP:-}" ]; then IPCONF="  use_external_ip: false
+  node_ip: ${PUBLIC_IP}"; else IPCONF="  use_external_ip: true"; fi
+
+cat > generated/livekit.yaml <<EOF
+# СГЕНЕРИРОВАНО deploy/render.sh — не править руками
+port: 7880
+rtc:
+  tcp_port: ${LK_TCP_PORT}
+  udp_port: ${LK_UDP_PORT}
+${IPCONF}
+turn:
+  enabled: true
+  domain: ${TURN_DOMAIN}
+  udp_port: ${TURN_UDP_PORT}
+  tls_port: ${TURN_TLS_INTERNAL}
+  external_tls: true          # TLS снимает Caddy
+  proxy_protocol: true        # Caddy передаёт настоящий IP клиента
+  proxy_protocol_trusted_cidrs: ["127.0.0.0/8", "::1/128"]
+room:
+  empty_timeout: 300
+  departure_timeout: 20
+  max_participants: ${LK_MAX_PARTICIPANTS}
+logging:
+  level: info
+keys:
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
+EOF
+
+# ── Caddy (layer4): TLS по SNI ──
+# Если перед Caddy стоит SNI-прокси с PROXY protocol (nginx stream) — заголовок разбирается (только с loopback).
+# Без заголовка соединения тоже принимаются (standalone).
+API_ROUTE=""; API_NAME=""
+if [ "${CADDY_SERVE_API}" = "1" ]; then
+  : "${API_DOMAIN:?}"
+  API_NAME=", \"${API_DOMAIN}\""
+  API_ROUTE=",
+          { \"match\": [{ \"tls\": { \"sni\": [\"${API_DOMAIN}\"] } }],
+            \"handle\": [ { \"handler\": \"tls\", \"connection_policies\": [{ \"alpn\": [\"http/1.1\"] }] },
+                        { \"handler\": \"proxy\", \"proxy_protocol\": \"v2\", \"upstreams\": [{ \"dial\": [\"${BACKEND_BIND}\"] }] } ] }"
+fi
+
+SNI_ROUTES="[
+          { \"match\": [{ \"tls\": { \"sni\": [\"${TURN_DOMAIN}\"] } }],
+            \"handle\": [ { \"handler\": \"tls\" },
+                        { \"handler\": \"proxy\", \"proxy_protocol\": \"v2\", \"upstreams\": [{ \"dial\": [\"127.0.0.1:${TURN_TLS_INTERNAL}\"] }] } ] },
+          { \"match\": [{ \"tls\": { \"sni\": [\"${LK_DOMAIN}\"] } }],
+            \"handle\": [ { \"handler\": \"tls\", \"connection_policies\": [{ \"alpn\": [\"http/1.1\"] }] },
+                        { \"handler\": \"proxy\", \"upstreams\": [{ \"dial\": [\"127.0.0.1:7880\"] }] } ] }${API_ROUTE}
+        ]"
+
+EMAIL_JSON=""; [ -n "${ACME_EMAIL}" ] && EMAIL_JSON="\"email\": \"${ACME_EMAIL}\","
+
+cat > generated/caddy.json <<EOF
+{
+  "admin": { "disabled": true },
+  "logging": { "logs": { "default": { "level": "INFO" } } },
+  "storage": { "module": "file_system", "root": "/data" },
+  "apps": {
+    "tls": {
+      "certificates": { "automate": ["${LK_DOMAIN}", "${TURN_DOMAIN}"${API_NAME}] },
+      "automation": { "policies": [ { "issuers": [ { "module": "acme", ${EMAIL_JSON}
+        "challenges": { "http": { "disabled": true } } } ] } ] }
+    },
+    "layer4": {
+      "servers": {
+        "main": {
+          "listen": ["${CADDY_LISTEN}"],
+          "routes": [
+            { "match": [{ "proxy_protocol": {} }],
+              "handle": [ { "handler": "proxy_protocol", "allow": ["127.0.0.1/32", "::1/128"] },
+                          { "handler": "subroute", "routes": ${SNI_ROUTES} } ] },
+            { "handle": [ { "handler": "subroute", "routes": ${SNI_ROUTES} } ] }
+          ]
+        }
+      }
+    }
+  }
+}
+EOF
+echo "ok: generated/livekit.yaml, generated/caddy.json"

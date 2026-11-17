@@ -1,0 +1,44 @@
+# Свой Discord — серверная часть. Настройка — только через deploy/.env (см. .env.example).
+# Запуск: sh deploy/up.sh   (render.sh + docker compose up -d)
+name: svoy-discord
+
+services:
+  livekit:
+    profiles: [media]
+    image: livekit/livekit-server:v1.13.11
+    command: --config /etc/livekit.yaml
+    network_mode: host          # WebRTC: без NAT докера, порты LK_TCP_PORT/LK_UDP_PORT/TURN_UDP_PORT напрямую
+    restart: unless-stopped
+    volumes:
+      - ./generated/livekit.yaml:/etc/livekit.yaml:ro
+
+  caddy:
+    profiles: [caddy]
+    image: livekit/caddyl4:v2.11.3   # Caddy + layer4 (TLS по SNI для wss и TURN/TLS)
+    command: run --config /etc/caddy.json
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./generated/caddy.json:/etc/caddy.json:ro
+      - caddy-data:/data
+
+  backend:
+    profiles: [backend]
+    build:
+      context: ..
+      dockerfile: crates/backend/Dockerfile
+      args: [HTTP_PROXY, HTTPS_PROXY, NO_PROXY]
+    image: svoy-discord/backend:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:///data/app.db
+    ports:
+      - "${BACKEND_BIND:-127.0.0.1:8080}:8080"
+    volumes:
+      - backend-data:/data
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+volumes:
+  caddy-data:
+  backend-data:
