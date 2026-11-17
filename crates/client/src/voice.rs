@@ -544,7 +544,8 @@ impl Engine {
             let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
             let publish = TrackPublishOptions {
                 source: TrackSource::Microphone,
-                audio_encoding: Some(AudioEncoding { max_bitrate: 32_000 }),
+                // 64 кбит/с (как у Discord по умолчанию): заметно чище 32 на голосе, трафик всё равно мизерный.
+                audio_encoding: Some(AudioEncoding { max_bitrate: 64_000 }),
                 dtx: true,
                 red: true,
                 ..Default::default()

@@ -17,18 +17,21 @@ pub enum Preset {
     #[default]
     P1080_30,
     P1080_60,
+    /// 2K (2560×1440), 60 к/с.
+    P1440_60,
     /// Исходное разрешение, 60 к/с.
     Native,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 4] = [Preset::P720_30, Preset::P1080_30, Preset::P1080_60, Preset::Native];
+    pub const ALL: [Preset; 5] = [Preset::P720_30, Preset::P1080_30, Preset::P1080_60, Preset::P1440_60, Preset::Native];
 
     pub fn label(self) -> &'static str {
         match self {
             Preset::P720_30 => "720p · 30",
             Preset::P1080_30 => "1080p · 30",
             Preset::P1080_60 => "1080p · 60",
+            Preset::P1440_60 => "2K (1440p) · 60",
             Preset::Native => "Исходное · 60",
         }
     }
@@ -38,6 +41,7 @@ impl Preset {
             Preset::P720_30 => (1280, 720, 30),
             Preset::P1080_30 => (1920, 1080, 30),
             Preset::P1080_60 => (1920, 1080, 60),
+            Preset::P1440_60 => (2560, 1440, 60),
             Preset::Native => (0, 0, 60),
         };
         CaptureConfig { max_width, max_height, fps }
@@ -49,7 +53,8 @@ impl Preset {
             Preset::P720_30 => 3_000_000,
             Preset::P1080_30 => 5_000_000,
             Preset::P1080_60 => 8_000_000,
-            Preset::Native => 8_000_000,
+            Preset::P1440_60 => 12_000_000,
+            Preset::Native => 12_000_000,
         }
     }
 }

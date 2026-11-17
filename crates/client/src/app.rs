@@ -584,6 +584,7 @@ impl App {
         let preset = match std::env::var("AMADEUS_STREAM_PRESET").as_deref() {
             Ok("720") => crate::stream::Preset::P720_30,
             Ok("1080p60") => crate::stream::Preset::P1080_60,
+            Ok("1440") => crate::stream::Preset::P1440_60,
             Ok("native") => crate::stream::Preset::Native,
             _ => crate::stream::Preset::P1080_30,
         };

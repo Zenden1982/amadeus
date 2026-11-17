@@ -300,7 +300,7 @@ impl Picker {
                 }
             });
         });
-        if matches!(self.preset, Preset::P1080_60 | Preset::Native) {
+        if matches!(self.preset, Preset::P1080_60 | Preset::P1440_60 | Preset::Native) {
             ui.label(RichText::new("Видео пока кодируется процессором — на слабом ПК 60 к/с могут проседать.").size(12.0).color(t::DUST));
         }
         out
