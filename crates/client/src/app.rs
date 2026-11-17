@@ -16,6 +16,7 @@ use proto::{AuthResponse, Channel, ChannelKind, Invite, User};
 use crate::api::{self, Api, ApiError, ApiResult};
 use crate::config::Settings;
 use crate::mictest::{self, MicTest};
+use crate::picker::{self, Picker};
 use crate::ptt::{self, Ptt};
 use crate::theme::{self as t, DockStyle};
 use crate::voice::{self, AudioPrefs, Cmd, Conn, Peer, VoiceHandle, VoiceState};
@@ -90,6 +91,8 @@ pub struct App {
     mic_test_error: Option<String>,
     mic_level: Arc<AtomicU32>,
     mic_playback: bool,
+    /// Пикер источника трансляции.
+    picker: Option<Picker>,
 }
 
 impl App {
@@ -157,6 +160,7 @@ impl App {
             mic_test_error: None,
             mic_level: Arc::new(AtomicU32::new(0)),
             mic_playback: false,
+            picker: None,
         };
         if has_token {
             app.fetch_me();
@@ -544,6 +548,8 @@ impl App {
         if std::env::var_os("AMADEUS_DEMO").is_some() {
             vs = demo_state(ui.input(|i| i.time));
         }
+        #[cfg(debug_assertions)]
+        self.debug_autostream(&vs);
         self.ui_sidebar(ui, &vs);
         self.ui_header(ui, &vs);
         self.ui_dock(ui, &vs);
@@ -554,6 +560,79 @@ impl App {
         self.ui_volume_popup(ui);
         if self.settings_open {
             self.ui_settings(ui, &vs);
+        }
+        if self.picker.is_some() {
+            self.ui_picker(ui, &vs);
+        }
+    }
+
+    /// Отладка: AMADEUS_AUTOSTREAM=screen | <часть заголовка окна> [+ AMADEUS_STREAM_PRESET=720|1080|1080p60|native] —
+    /// начать трансляцию сразу после входа в канал (один раз).
+    #[cfg(debug_assertions)]
+    fn debug_autostream(&mut self, vs: &VoiceState) {
+        use std::sync::atomic::AtomicBool;
+        static DONE: AtomicBool = AtomicBool::new(false);
+        static PICKER: AtomicBool = AtomicBool::new(false);
+        // AMADEUS_OPEN_PICKER=1 — открыть пикер сразу после входа (скриншоты).
+        if vs.conn == Conn::Connected && std::env::var_os("AMADEUS_OPEN_PICKER").is_some() && !PICKER.swap(true, Ordering::Relaxed) {
+            self.open_picker(vs);
+        }
+        let Ok(want) = std::env::var("AMADEUS_AUTOSTREAM") else { return };
+        if vs.conn != Conn::Connected || DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let preset = match std::env::var("AMADEUS_STREAM_PRESET").as_deref() {
+            Ok("720") => crate::stream::Preset::P720_30,
+            Ok("1080p60") => crate::stream::Preset::P1080_60,
+            Ok("native") => crate::stream::Preset::Native,
+            _ => crate::stream::Preset::P1080_30,
+        };
+        let tx = self.voice.sender();
+        std::thread::spawn(move || {
+            let list = capture_win::list_sources(64, 36);
+            let found = if want == "screen" {
+                list.into_iter().find(|s| !s.id.is_window())
+            } else {
+                list.into_iter().find(|s| s.title.to_lowercase().contains(&want.to_lowercase()))
+            };
+            match found {
+                Some(s) => {
+                    let _ = tx.send(Cmd::StartStream { source: s.id, title: s.title, width: s.width, height: s.height, preset });
+                }
+                None => log::warn!("AMADEUS_AUTOSTREAM: источник «{want}» не найден"),
+            }
+            // AMADEUS_AUTOSTREAM_THEN=<часть заголовка> — через 15 с сменить источник на лету.
+            if let Ok(next) = std::env::var("AMADEUS_AUTOSTREAM_THEN") {
+                std::thread::sleep(Duration::from_secs(15));
+                let list = capture_win::list_sources(64, 36);
+                if let Some(s) = list.into_iter().find(|s| s.title.to_lowercase().contains(&next.to_lowercase())) {
+                    let _ = tx.send(Cmd::StartStream { source: s.id, title: s.title, width: s.width, height: s.height, preset });
+                }
+            }
+        });
+    }
+
+    fn open_picker(&mut self, vs: &VoiceState) {
+        let current = vs.stream.as_ref().map(|s| s.source);
+        let preset = vs.stream.as_ref().map(|s| s.preset).unwrap_or(self.settings.stream_preset);
+        self.picker = Some(Picker::open(&self.ctx, preset, current));
+    }
+
+    fn ui_picker(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        if vs.channel.is_none() {
+            self.picker = None;
+            return;
+        }
+        let Some(p) = &mut self.picker else { return };
+        match p.ui(ui.ctx()) {
+            picker::Action::None => {}
+            picker::Action::Cancel => self.picker = None,
+            picker::Action::Start { source, title, width, height, preset } => {
+                self.settings.stream_preset = preset;
+                self.settings.save();
+                self.voice.send(Cmd::StartStream { source, title, width, height, preset });
+                self.picker = None;
+            }
         }
     }
 
@@ -680,9 +759,15 @@ impl App {
                             ui.label(RichText::new("Не в канале").font(t::xbold(18.0)).color(t::DUST));
                         }
                     }
-                    if let Some(rtt) = vs.rtt {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ping_box(ui, rtt));
-                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(rtt) = vs.rtt {
+                            ping_box(ui, rtt);
+                        }
+                        if let Some(s) = &vs.stream {
+                            ui.add_space(4.0);
+                            stream_pill(ui, s);
+                        }
+                    });
                 });
             });
     }
@@ -709,7 +794,13 @@ impl App {
                 let snd_icon = if vs.deafened { ph::SPEAKER_SLASH } else { ph::HEADPHONES };
                 let key = ptt::key_name(self.settings.ptt_key);
                 // ширина ряда — чтобы отцентровать
-                let est = 140.0 + 110.0 + if vs.ptt_enabled { 150.0 + key.len() as f32 * 7.0 } else { 0.0 } + if in_room { 170.0 } else { 0.0 };
+                let can_stream = in_room && vs.conn == Conn::Connected;
+                let streaming = vs.stream.is_some();
+                let est = 140.0
+                    + 110.0
+                    + if vs.ptt_enabled { 150.0 + key.len() as f32 * 7.0 } else { 0.0 }
+                    + if in_room { 170.0 } else { 0.0 }
+                    + if streaming { 300.0 } else if can_stream { 120.0 } else { 0.0 };
                 ui.horizontal_centered(|ui| {
                     ui.add_space(((r.width() - est) / 2.0).max(12.0));
                     ui.spacing_mut().item_spacing.x = 12.0;
@@ -724,6 +815,21 @@ impl App {
                         ui.label(RichText::new("Рация: держите").size(13.0).color(t::DUST));
                         t::keycap(ui, &key);
                         ui.add_space(4.0);
+                    }
+                    if streaming {
+                        if t::dock_button(ui, ph::MONITOR_ARROW_UP, "Остановить", DockStyle::Live)
+                            .on_hover_text("Остановить трансляцию")
+                            .clicked()
+                        {
+                            self.voice.send(Cmd::StopStream);
+                        }
+                        if t::dock_button(ui, ph::SWAP, "Сменить", DockStyle::Normal).on_hover_text("Сменить окно или экран без остановки").clicked() {
+                            self.open_picker(vs);
+                        }
+                    } else if can_stream
+                        && t::dock_button(ui, ph::MONITOR_ARROW_UP, "Экран", DockStyle::Normal).on_hover_text("Показать окно или экран").clicked()
+                    {
+                        self.open_picker(vs);
                     }
                     if in_room && t::dock_button(ui, ph::PHONE_X, "Отключиться", DockStyle::Leave).clicked() {
                         self.voice.send(Cmd::Leave);
@@ -801,6 +907,26 @@ impl App {
     }
 
     fn ui_banner(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        if let Some(n) = &vs.stream_notice {
+            egui::Area::new(Id::new("stream-notice"))
+                .order(egui::Order::Foreground)
+                .anchor(Align2::CENTER_BOTTOM, vec2(130.0, -96.0))
+                .show(ui.ctx(), |ui| {
+                    let r = Frame::new()
+                        .fill(Color32::from_rgb(0x2E, 0x1A, 0x17))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(0x6B, 0x33, 0x2C)))
+                        .corner_radius(CornerRadius::same(255))
+                        .inner_margin(Margin::symmetric(16, 8))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(format!("{}  {n}   {}", ph::MONITOR, ph::X)).color(t::ERR_TEXT).size(13.5));
+                        })
+                        .response
+                        .interact(Sense::click());
+                    if r.on_hover_text("Скрыть").clicked() {
+                        self.voice.send(Cmd::DismissStreamNotice);
+                    }
+                });
+        }
         let text = match vs.conn {
             Conn::Reconnecting => "Связь пропала — переподключаемся…".to_string(),
             Conn::Rejoining { attempt } => format!("Связь пропала — возвращаемся в канал (попытка {attempt})…"),
@@ -1137,6 +1263,7 @@ fn demo_state(time: f64) -> VoiceState {
         speaking,
         level: if speaking { (0.15 + 0.15 * (time * 7.0).sin().abs()) as f32 } else { 0.0 },
         mic_muted: muted,
+        streaming: id == "kurisu",
     };
     VoiceState {
         conn: if std::env::var_os("AMADEUS_DEMO_RECONNECT").is_some() { Conn::Reconnecting } else { Conn::Connected },
@@ -1200,8 +1327,13 @@ fn member_row(ui: &mut Ui, p: &Peer) {
     t::avatar(painter, c, 11.0, &p.name, glow * 0.7, false);
     let color = if glow > 0.05 { t::PAPER } else { t::DUST };
     painter.text(pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, &p.name, t::font(13.5), color);
+    let mut x = rect.right() - 22.0;
     if p.mic_muted {
-        painter.text(pos2(rect.right() - 22.0, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::SIGNAL);
+        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::SIGNAL);
+        x -= 20.0;
+    }
+    if p.streaming {
+        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::NIXIE);
     }
 }
 
@@ -1238,12 +1370,57 @@ fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32) {
             t::SIGNAL,
         );
     }
+    if p.streaming {
+        live_badge(painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
+    }
     if p.is_local {
         let tag = painter.layout_no_wrap("это вы".into(), t::font(12.0), t::DUST);
         let tr = Rect::from_min_size(rect.min + vec2(12.0, 12.0), tag.size() + vec2(16.0, 6.0));
         painter.rect_filled(tr, CornerRadius::same(6), t::GLASS);
         painter.galley(tr.min + vec2(8.0, 3.0), tag, t::DUST);
     }
+}
+
+/// Плашка «В ЭФИРЕ» (правый верхний угол = `right_top`).
+fn live_badge(painter: &egui::Painter, right_top: Pos2) {
+    let galley = painter.layout_no_wrap("В ЭФИРЕ".into(), t::bold(11.0), t::ON_NIXIE);
+    let size = galley.size() + vec2(24.0, 8.0);
+    let r = Rect::from_min_size(pos2(right_top.x - size.x, right_top.y), size);
+    painter.rect_filled(r.expand(3.0), CornerRadius::same(9), t::nixie_a(30));
+    painter.rect_filled(r, CornerRadius::same(6), t::NIXIE);
+    painter.circle_filled(pos2(r.left() + 9.0, r.center().y), 3.0, t::ON_NIXIE);
+    painter.galley(pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, t::ON_NIXIE);
+}
+
+/// Статус своей трансляции в шапке: источник, качество, факт к/с и битрейт, энкодер.
+fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
+    let title: String = if s.title.chars().count() > 28 { s.title.chars().take(27).chain(['…']).collect() } else { s.title.clone() };
+    let resp = Frame::new()
+        .fill(t::nixie_a(18))
+        .stroke(Stroke::new(1.0, t::nixie_a(110)))
+        .corner_radius(CornerRadius::same(255))
+        .inner_margin(Margin::symmetric(14, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                // right_to_left родитель — порядок обратный
+                if s.minimized {
+                    ui.label(RichText::new("окно свёрнуто").size(12.5).color(t::ERR_TEXT));
+                } else if s.fps > 0.0 {
+                    ui.label(RichText::new(format!("{:.0} к/с · {:.1} Мбит/с", s.fps, s.kbps / 1000.0)).size(12.5).color(t::DUST));
+                }
+                ui.label(RichText::new(&title).font(t::semibold(13.0)).color(t::FILAMENT));
+                ui.label(RichText::new(egui_phosphor::fill::MONITOR_ARROW_UP).font(t::icon_fill(15.0)).color(t::NIXIE));
+            });
+        })
+        .response;
+    let size = s.size.map(|(w, h)| format!("{w}×{h}")).unwrap_or_else(|| "—".into());
+    let enc = s.encoder.clone().unwrap_or_else(|| "определяется…".into());
+    let lim = s.limitation.as_deref().map(|l| format!("
+Ограничение качества: {l}")).unwrap_or_default();
+    resp.on_hover_text(format!("В эфире: {}
+Качество: {} · отправляется {size}
+Энкодер: {enc}{lim}", s.title, s.preset.label()));
 }
 
 fn ping_box(ui: &mut Ui, rtt: f64) {

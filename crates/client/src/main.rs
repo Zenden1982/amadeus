@@ -5,11 +5,15 @@ mod api;
 mod app;
 mod config;
 mod mictest;
-mod msvc_shim;
+mod picker;
 mod ptt;
 mod sounds;
+mod stream;
 mod theme;
 mod voice;
+
+// Символ STL 14.44 для предкомпилированного libwebrtc (см. crates/msvc-shim).
+use msvc_shim as _;
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,livekit=info,libwebrtc=warn,wgpu=warn,eframe=warn"))

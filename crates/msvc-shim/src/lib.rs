@@ -3,8 +3,11 @@
 //! Он ссылается на `__std_find_first_of_trivial_pos_1` из STL 14.44, а на ПК стоит MSVC 14.43.
 //! Здесь — эквивалентная реализация (семантика из vector_algorithms.cpp STL: индекс первого байта
 //! из [first1, first1+count1), входящего в набор [first2, first2+count2), иначе SIZE_MAX).
+//! Подключать в каждом бинаре/тесте, который линкует libwebrtc: `use msvc_shim as _;`.
 //! **Удалить после обновления VS Build Tools до 17.14+** (иначе будет дубль символа, LNK2005).
 
+/// # Safety
+/// Указатели должны задавать валидные диапазоны указанной длины (их передаёт STL).
 #[cfg(all(windows, target_env = "msvc"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __std_find_first_of_trivial_pos_1(

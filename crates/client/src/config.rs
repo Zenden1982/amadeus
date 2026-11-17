@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::stream::Preset;
+
 /// Адрес сервера по умолчанию (переопределяется при сборке: `AMADEUS_SERVER=https://… cargo build`).
 pub const DEFAULT_SERVER: &str = match option_env!("AMADEUS_SERVER") {
     Some(s) => s,
@@ -34,6 +36,8 @@ pub struct Settings {
     pub user_volume: HashMap<String, f32>,
     /// Заглушённые для себя участники.
     pub user_muted: HashMap<String, bool>,
+    /// Качество трансляции по умолчанию (последнее выбранное).
+    pub stream_preset: Preset,
 }
 
 impl Default for Settings {
@@ -52,6 +56,7 @@ impl Default for Settings {
             sounds: true,
             user_volume: HashMap::new(),
             user_muted: HashMap::new(),
+            stream_preset: Preset::default(),
         }
     }
 }

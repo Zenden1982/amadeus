@@ -1,0 +1,23 @@
+[package]
+name = "capture-win"
+description = "Amadeus — захват окна/экрана на Windows (WGC) с конвертацией в I420"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Тот же libwebrtc, что внутри livekit (патченый, см. [patch.crates-io]): I420Buffer + libyuv.
+libwebrtc = "0.4.1"
+log = "0.4"
+msvc-shim = { path = "../msvc-shim" }
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
