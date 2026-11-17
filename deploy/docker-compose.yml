@@ -14,7 +14,10 @@ services:
 
   caddy:
     profiles: [caddy]
-    image: livekit/caddyl4:v2.11.3   # Caddy + layer4 (TLS по SNI для wss и TURN/TLS)
+    build:
+      context: ./caddy             # Caddy + layer4 (TLS по SNI для wss и TURN/TLS), см. caddy/Dockerfile
+      args: [HTTP_PROXY, HTTPS_PROXY]
+    image: svoy-discord/caddy-l4:2.11.9
     command: run --config /etc/caddy.json
     network_mode: host
     restart: unless-stopped

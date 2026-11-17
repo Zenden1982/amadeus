@@ -9,7 +9,7 @@ set -a; . ./.env; set +a
 : "${LK_DOMAIN:?}" "${TURN_DOMAIN:?}"
 : "${LK_TCP_PORT:=7881}" "${LK_UDP_PORT:=7882}" "${TURN_UDP_PORT:=3478}"
 : "${CADDY_LISTEN:=:443}" "${CADDY_SERVE_API:=0}" "${LK_MAX_PARTICIPANTS:=20}" "${ACME_EMAIL:=}"
-: "${BACKEND_BIND:=127.0.0.1:8080}"
+: "${BACKEND_BIND:=127.0.0.1:8080}" "${ACME_CA:=}" "${CADDY_LOG_LEVEL:=INFO}"
 TURN_TLS_INTERNAL=5349   # только loopback: сюда Caddy отдаёт расшифрованный TURN/TLS
 
 [ -n "${LIVEKIT_API_KEY:-}" ] && [ -n "${LIVEKIT_API_SECRET:-}" ] || {
@@ -70,11 +70,12 @@ SNI_ROUTES="[
         ]"
 
 EMAIL_JSON=""; [ -n "${ACME_EMAIL}" ] && EMAIL_JSON="\"email\": \"${ACME_EMAIL}\","
+[ -n "${ACME_CA}" ] && EMAIL_JSON="${EMAIL_JSON} \"ca\": \"${ACME_CA}\","
 
 cat > generated/caddy.json <<EOF
 {
   "admin": { "disabled": true },
-  "logging": { "logs": { "default": { "level": "INFO" } } },
+  "logging": { "logs": { "default": { "level": "${CADDY_LOG_LEVEL}" } } },
   "storage": { "module": "file_system", "root": "/data" },
   "apps": {
     "tls": {

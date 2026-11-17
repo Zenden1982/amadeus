@@ -47,7 +47,7 @@ PROXY protocol от прокси принимается (только с 127.0.0
 
 ## Сервер без доступа к Docker Hub / crates.io
 - Прокси для сборки: раскомментировать `HTTP_PROXY/HTTPS_PROXY` в `.env` (передаются как build-args).
-- Или перенести образы готовыми: `docker save livekit/livekit-server:v1.13.11 livekit/caddyl4:v2.11.3 | ssh host docker load`.
+- Или перенести образы готовыми: `docker compose build caddy` на своём ПК, затем `docker save livekit/livekit-server:v1.13.11 svoy-discord/caddy-l4:2.11.9 | ssh host docker load`.
 
 ## Проверка
 ```sh
