@@ -21,6 +21,11 @@ umask 077
 # ── LiveKit ──
 if [ -n "${PUBLIC_IP:-}" ]; then IPCONF="  use_external_ip: false
   node_ip: ${PUBLIC_IP}"; else IPCONF="  use_external_ip: true"; fi
+# Ограничить медиа сетевыми интерфейсами (через запятую, напр. "eth0"). Нужно, если на хосте есть туннели (WireGuard и т.п.):
+# иначе LiveKit слушает UDP на всех адресах и может ответить клиенту с адреса туннеля — провайдер такие пакеты выбрасывает.
+if [ -n "${LK_RTC_INTERFACES:-}" ]; then IPCONF="${IPCONF}
+  interfaces:
+    includes: [${LK_RTC_INTERFACES}]"; fi
 
 cat > generated/livekit.yaml <<EOF
 # СГЕНЕРИРОВАНО deploy/render.sh — не править руками
