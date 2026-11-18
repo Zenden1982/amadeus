@@ -10,7 +10,7 @@ use proto::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, SESSION_TTL, channels, chat, events, images, invites, releases, servers,
+    AppState, SESSION_TTL, channels, chat, events, images, invites, releases, servers, voice,
     db::{self},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
@@ -66,6 +66,8 @@ pub fn router(state: AppState) -> Router {
         .route("/servers/{id}/bans", get(servers::bans).post(servers::ban))
         .route("/servers/{id}/bans/{uid}", delete(servers::unban))
         .route("/images/{key}", get(images::get_image))
+        .route("/livekit/webhook", post(voice::webhook))
+        .route("/servers/{id}/voice", get(voice::server_voice))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

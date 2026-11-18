@@ -11,7 +11,7 @@ axum = "0.8.9"
 clap = { version = "4.6.8", features = ["derive", "env"] }
 futures-util = "0.3"
 imagesize = "0.15.0"
-livekit-api = { version = "0.10.2", default-features = false, features = ["access-token"] }
+livekit-api = { version = "0.10.2", default-features = false, features = ["access-token", "services", "webhooks", "rustls-tls-webpki-roots"] }
 proto = { path = "../proto" }
 rand = "0.10.4"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -24,5 +24,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
+base64 = "0.22"
 http-body-util = "0.1.5"
 tower = "0.5.3"

@@ -2,17 +2,25 @@
 //! Комната голосового канала — `srv-{server}-ch-{channel}`; identity участника — id пользователя.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     pin::Pin,
     sync::Mutex,
 };
 
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header},
+};
+use livekit_api::{access_token::TokenVerifier, services::room::RoomClient, webhooks::WebhookReceiver};
 use proto::{ServerEvent, VoiceRoster};
 
 use crate::{
     AppState,
+    error::{AppError, AppResult},
     events::{Audience, publish},
+    extract::AuthUser,
 };
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -51,15 +59,15 @@ pub fn parse_room(name: &str) -> Option<(i64, i64)> {
     Some((s.parse().ok()?, c.parse().ok()?))
 }
 
-/// Присутствие: комната → user id.
+/// Присутствие: комната → (user id → sid участника LiveKit; "" — неизвестен, после сверки).
 #[derive(Default)]
 pub struct Presence {
-    rooms: Mutex<HashMap<String, BTreeSet<i64>>>,
+    rooms: Mutex<HashMap<String, BTreeMap<i64, String>>>,
 }
 
 impl Presence {
     pub fn roster(&self, room: &str) -> Vec<i64> {
-        self.rooms.lock().unwrap().get(room).map(|s| s.iter().copied().collect()).unwrap_or_default()
+        self.rooms.lock().unwrap().get(room).map(|s| s.keys().copied().collect()).unwrap_or_default()
     }
 
     /// Все непустые голосовые каналы сервера.
@@ -69,7 +77,7 @@ impl Presence {
             .iter()
             .filter_map(|(room, ids)| {
                 let (s, c) = parse_room(room)?;
-                (s == server_id && !ids.is_empty()).then(|| VoiceRoster { channel_id: c, user_ids: ids.iter().copied().collect() })
+                (s == server_id && !ids.is_empty()).then(|| VoiceRoster { channel_id: c, user_ids: ids.keys().copied().collect() })
             })
             .collect();
         v.sort_by_key(|r| r.channel_id);
@@ -82,18 +90,18 @@ impl Presence {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(room, ids)| parse_room(room).is_some_and(|(s, _)| s == server_id) && ids.contains(&user_id))
+            .filter(|(room, ids)| parse_room(room).is_some_and(|(s, _)| s == server_id) && ids.contains_key(&user_id))
             .map(|(r, _)| r.clone())
             .collect()
     }
 
-    /// Изменить состав комнаты; true — если что-то поменялось.
-    fn update(&self, room: &str, f: impl FnOnce(&mut BTreeSet<i64>)) -> bool {
+    /// Изменить состав комнаты; true — если поменялся список людей.
+    fn update(&self, room: &str, f: impl FnOnce(&mut BTreeMap<i64, String>)) -> bool {
         let mut rooms = self.rooms.lock().unwrap();
         let set = rooms.entry(room.to_string()).or_default();
-        let before = set.clone();
+        let before: Vec<i64> = set.keys().copied().collect();
         f(set);
-        let changed = *set != before;
+        let changed = set.keys().copied().ne(before.iter().copied());
         if set.is_empty() {
             rooms.remove(room);
         }
@@ -108,17 +116,26 @@ fn broadcast_roster(state: &AppState, room: &str) {
     }
 }
 
-pub fn joined(state: &AppState, room: &str, user_id: i64) {
+pub fn joined(state: &AppState, room: &str, user_id: i64, sid: &str) {
     if state.inner.presence.update(room, |s| {
-        s.insert(user_id);
+        s.insert(user_id, sid.to_string());
     }) {
         broadcast_roster(state, room);
     }
 }
 
-pub fn left(state: &AppState, room: &str, user_id: i64) {
+/// Вышел участник с этим sid. Если человек уже переподключился (другой sid) — он остаётся.
+/// `sid = None` — убрать безусловно (кик).
+pub fn left(state: &AppState, room: &str, user_id: i64, sid: Option<&str>) {
     if state.inner.presence.update(room, |s| {
-        s.remove(&user_id);
+        let same = match (s.get(&user_id), sid) {
+            (Some(cur), Some(sid)) => cur.is_empty() || cur == sid,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if same {
+            s.remove(&user_id);
+        }
     }) {
         broadcast_roster(state, room);
     }
@@ -133,21 +150,27 @@ pub fn room_finished(state: &AppState, room: &str) {
 /// Сверить присутствие со списком LiveKit (потерянные вебхуки, перезапуск бэкенда).
 pub async fn reconcile(state: &AppState) -> anyhow::Result<()> {
     let listing = state.inner.rooms.list().await?;
-    let mut fresh: HashMap<String, BTreeSet<i64>> = HashMap::new();
-    for (room, ids) in listing {
-        if parse_room(&room).is_none() {
-            continue;
-        }
-        let set: BTreeSet<i64> = ids.iter().filter_map(|i| i.parse().ok()).collect();
-        if !set.is_empty() {
-            fresh.insert(room, set);
-        }
-    }
     let changed: Vec<String> = {
         let mut rooms = state.inner.presence.rooms.lock().unwrap();
+        let mut fresh: HashMap<String, BTreeMap<i64, String>> = HashMap::new();
+        for (room, ids) in listing {
+            if parse_room(&room).is_none() {
+                continue;
+            }
+            let old = rooms.get(&room);
+            let set: BTreeMap<i64, String> = ids
+                .iter()
+                .filter_map(|i| i.parse().ok())
+                .map(|uid| (uid, old.and_then(|o| o.get(&uid)).cloned().unwrap_or_default()))
+                .collect();
+            if !set.is_empty() {
+                fresh.insert(room, set);
+            }
+        }
+        let ids_of = |m: Option<&BTreeMap<i64, String>>| m.map(|m| m.keys().copied().collect::<Vec<_>>()).unwrap_or_default();
         let mut keys: BTreeSet<String> = rooms.keys().cloned().collect();
         keys.extend(fresh.keys().cloned());
-        let changed = keys.into_iter().filter(|k| rooms.get(k) != fresh.get(k)).collect();
+        let changed = keys.into_iter().filter(|k| ids_of(rooms.get(k)) != ids_of(fresh.get(k))).collect();
         *rooms = fresh;
         changed
     };
@@ -168,7 +191,7 @@ pub async fn remove_from_room(state: &AppState, room: &str, user_id: i64) {
     if let Err(e) = state.inner.rooms.remove(room, &user_id.to_string()).await {
         tracing::warn!(%room, user_id, error = ?e, "не удалось выкинуть из комнаты");
     }
-    left(state, room, user_id);
+    left(state, room, user_id, None);
 }
 
 /// Очистить комнату целиком (канал или сервер удалён).
@@ -176,6 +199,104 @@ pub async fn clear_room(state: &AppState, room: &str) {
     for uid in state.inner.presence.roster(room) {
         remove_from_room(state, room, uid).await;
     }
+}
+
+// ---------------------------------------------------------------- HTTP
+
+/// `POST /livekit/webhook` — события LiveKit (подпись: JWT с sha256 тела, ключ API).
+pub async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: String) -> AppResult<StatusCode> {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).trim())
+        .filter(|v| !v.is_empty())
+        .ok_or(AppError::Unauthorized)?;
+    let lk = &state.inner.livekit;
+    let receiver = WebhookReceiver::new(TokenVerifier::with_api_key(&lk.api_key, &lk.api_secret));
+    let ev = receiver.receive(&body, auth).map_err(|e| {
+        tracing::warn!(error = %e, "webhook rejected");
+        AppError::Unauthorized
+    })?;
+    let room = ev.room.as_ref().map(|r| r.name.as_str()).unwrap_or("");
+    if parse_room(room).is_none() {
+        return Ok(StatusCode::OK);
+    }
+    let participant = ev.participant.as_ref();
+    let uid = participant.and_then(|p| p.identity.parse::<i64>().ok());
+    let sid = participant.map(|p| p.sid.as_str()).unwrap_or("");
+    match (ev.event.as_str(), uid) {
+        ("participant_joined", Some(uid)) => joined(&state, room, uid, sid),
+        ("participant_left" | "participant_connection_aborted", Some(uid)) => left(&state, room, uid, Some(sid)),
+        ("room_finished", _) => room_finished(&state, room),
+        _ => {}
+    }
+    tracing::debug!(event = %ev.event, %room, ?uid, "livekit webhook");
+    Ok(StatusCode::OK)
+}
+
+/// `GET /servers/{id}/voice` — кто в каких голосовых каналах сервера.
+pub async fn server_voice(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<Json<Vec<VoiceRoster>>> {
+    crate::perm::member(&state.inner.db, id, user.id).await?;
+    Ok(Json(state.inner.presence.of_server(id)))
+}
+
+/// Настоящий RoomService LiveKit.
+pub struct LiveKitRooms {
+    client: RoomClient,
+}
+
+impl LiveKitRooms {
+    /// `api_url` — https-адрес LiveKit (пусто — из публичного wss-адреса).
+    pub fn new(api_url: &str, lk: &crate::config::LiveKitConfig) -> Self {
+        let host = if api_url.is_empty() {
+            lk.public_url.replacen("wss://", "https://", 1).replacen("ws://", "http://", 1)
+        } else {
+            api_url.to_string()
+        };
+        Self { client: RoomClient::with_api_key(&host, &lk.api_key, &lk.api_secret) }
+    }
+}
+
+impl Rooms for LiveKitRooms {
+    fn list(&self) -> BoxFut<'_, anyhow::Result<RoomListing>> {
+        Box::pin(async move {
+            let mut out = Vec::new();
+            for room in self.client.list_rooms(Vec::new()).await? {
+                if parse_room(&room.name).is_none() {
+                    continue;
+                }
+                let ps = self.client.list_participants(&room.name).await?;
+                out.push((room.name, ps.into_iter().map(|p| p.identity).collect()));
+            }
+            Ok(out)
+        })
+    }
+
+    fn remove<'a>(&'a self, room: &'a str, identity: &'a str) -> BoxFut<'a, anyhow::Result<()>> {
+        Box::pin(async move { Ok(self.client.remove_participant(room, identity).await?) })
+    }
+}
+
+/// Сверка при старте и раз в минуту.
+pub fn spawn_reconciler(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut shutdown = state.inner.shutdown.subscribe();
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    if let Err(e) = reconcile(&state).await {
+                        tracing::warn!(error = ?e, "сверка голосовых комнат не удалась");
+                    }
+                }
+                r = shutdown.changed() => {
+                    if r.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

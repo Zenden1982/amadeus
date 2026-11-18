@@ -128,7 +128,9 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         cfg.uploads_dir.clone(),
         cfg.releases_dir.clone(),
     );
+    let state = state.with_rooms(std::sync::Arc::new(backend::voice::LiveKitRooms::new(&cfg.livekit_api_url, &cfg.livekit)));
     backend::chat::spawn_janitor(state.clone());
+    backend::voice::spawn_reconciler(state.clone());
     let app = backend::router(state.clone());
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     tracing::info!(

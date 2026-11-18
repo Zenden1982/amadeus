@@ -22,6 +22,11 @@ pub struct Config {
     #[command(flatten)]
     pub livekit: LiveKitConfig,
 
+    /// Адрес API LiveKit для бэкенда (RoomService), если отличается от публичного (например, внутренний).
+    /// Пусто — https-вариант LIVEKIT_PUBLIC_URL.
+    #[arg(long, env = "LIVEKIT_API_URL", default_value = "")]
+    pub livekit_api_url: String,
+
     /// Сколько доверенных reverse-proxy стоит перед бэкендом. 0 — IP клиента = адрес TCP-пира;
     /// N — берём N-й адрес с конца заголовка X-Forwarded-For (его дописал ближайший доверенный прокси).
     #[arg(long, env = "TRUSTED_PROXY_HOPS", default_value_t = 0)]
