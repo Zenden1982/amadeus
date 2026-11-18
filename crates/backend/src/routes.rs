@@ -12,11 +12,11 @@ use proto::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat, releases,
+    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat, events, images, releases, servers,
     db::{self, ChannelRow, InviteRow},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
-    now, security,
+    now, perm, security,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -44,7 +44,19 @@ pub fn router(state: AppState) -> Router {
             post(chat::upload).layer(DefaultBodyLimit::max(limits::IMAGE_MAX_BYTES + 64 * 1024)),
         )
         .route("/attachments/{id}", get(chat::get_attachment))
-        .route("/events", get(chat::events))
+        .route("/events", get(events::events))
+        .route("/servers", get(servers::list).post(servers::create))
+        .route("/servers/{id}", axum::routing::patch(servers::update).delete(servers::delete))
+        .route(
+            "/servers/{id}/icon",
+            axum::routing::put(servers::put_icon)
+                .delete(servers::delete_icon)
+                .layer(DefaultBodyLimit::max(limits::IMAGE_PROFILE_MAX_BYTES + 64 * 1024)),
+        )
+        .route("/servers/{id}/transfer", post(servers::transfer))
+        .route("/servers/{id}/members", get(servers::members))
+        .route("/servers/{id}/members/@me", delete(servers::leave))
+        .route("/images/{key}", get(images::get_image))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -100,19 +112,25 @@ async fn register(
 
     // Списание инвайта и создание пользователя — одной транзакцией.
     let mut tx = state.inner.db.begin().await?;
-    let used = sqlx::query(
+    let server_id: Option<Option<i64>> = sqlx::query_scalar(
         "UPDATE invites SET uses_left = uses_left - 1
-         WHERE code = ? AND revoked = 0 AND uses_left > 0 AND (expires_at IS NULL OR expires_at > ?)",
+         WHERE code = ? AND revoked = 0 AND uses_left > 0 AND (expires_at IS NULL OR expires_at > ?)
+         RETURNING server_id",
     )
     .bind(&code)
     .bind(now())
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if used != 1 {
-        return Err(AppError::InvalidInvite);
-    }
+    .fetch_optional(&mut *tx)
+    .await?;
+    let server_id = server_id.flatten().ok_or(AppError::InvalidInvite)?;
     let id = db::insert_user(&mut tx, &name, &hash, false).await?;
+    let role = perm::default_role(&mut *tx, server_id).await?;
+    sqlx::query("INSERT INTO server_members (server_id, user_id, role_id, joined_at) VALUES (?, ?, ?, ?)")
+        .bind(server_id)
+        .bind(id)
+        .bind(role)
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     tracing::info!(user_id = id, %name, "registered by invite");
 
@@ -195,7 +213,8 @@ async fn create_channel(
     user: AuthUser,
     ApiJson(req): ApiJson<CreateChannelRequest>,
 ) -> AppResult<(StatusCode, Json<Channel>)> {
-    user.require_admin()?;
+    // совместимость 0.2.x: каналы сервера №1
+    perm::member(&state.inner.db, 1, user.id).await.map_err(|_| AppError::Forbidden)?.require(proto::perm::MANAGE_CHANNELS)?;
     let name = req.name.trim().to_string();
     if name.is_empty() || name.chars().count() > limits::CHANNEL_NAME_MAX {
         return Err(AppError::Validation(format!(
@@ -203,7 +222,10 @@ async fn create_channel(
             limits::CHANNEL_NAME_MAX
         )));
     }
-    let id = sqlx::query("INSERT INTO channels (name, kind, created_at) VALUES (?, ?, ?)")
+    let id = sqlx::query(
+        "INSERT INTO channels (name, kind, created_at, server_id, position)
+         VALUES (?, ?, ?, 1, (SELECT COALESCE(MAX(position) + 1, 0) FROM channels WHERE server_id = 1))",
+    )
         .bind(&name)
         .bind(req.kind.as_str())
         .bind(now())
@@ -321,6 +343,7 @@ async fn create_invite(
     user.require_admin()?;
     let inv = db::create_invite(
         &state.inner.db,
+        1,
         user.id,
         req.uses.unwrap_or(1),
         req.expires_in_hours.unwrap_or(168),

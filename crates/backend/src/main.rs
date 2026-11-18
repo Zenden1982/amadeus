@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
                     .fetch_optional(&pool)
                     .await?;
             let admin = admin.context("нет администратора: сначала backend create-admin")?;
-            let inv = backend::create_invite(&pool, admin, uses, hours)
+            let inv = backend::create_invite(&pool, 1, admin, uses, hours)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             println!("{}", inv.code);

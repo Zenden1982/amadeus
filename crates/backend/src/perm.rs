@@ -1,6 +1,4 @@
 //! Права на сервере: кто ты на этом сервере и что тебе можно (proto::perm, иерархия ролей).
-// TODO(9.1, задача 5): убрать, когда маршруты начнут использовать модуль.
-#![allow(dead_code)]
 
 use proto::perm;
 use sqlx::SqlitePool;
@@ -28,11 +26,13 @@ impl MemberCtx {
     }
 
     /// Действовать над человеком (кик, бан, роль, выкинуть из голоса) — только если его роль строго ниже.
+    #[allow(dead_code)] // задача 7
     pub fn can_act_on(&self, target: &MemberCtx) -> bool {
         !target.is_owner && (self.is_owner || target.position < self.position)
     }
 
     /// Назначить роль можно только строго ниже своей; «Владелец» (позиция 3) — никогда.
+    #[allow(dead_code)] // задача 7
     pub fn can_assign(&self, role_position: i32) -> bool {
         role_position < OWNER_POSITION && role_position < self.position
     }
@@ -69,6 +69,7 @@ pub async fn channel_member(db: &SqlitePool, channel_id: i64, user_id: i64) -> A
     Ok((m, ch))
 }
 
+#[allow(dead_code)] // задача 6
 pub async fn is_banned(db: &SqlitePool, server_id: i64, user_id: i64) -> AppResult<bool> {
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_bans WHERE server_id = ? AND user_id = ?")
         .bind(server_id)
@@ -80,6 +81,7 @@ pub async fn is_banned(db: &SqlitePool, server_id: i64, user_id: i64) -> AppResu
 
 /// id стандартных ролей сервера.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct DefaultRoles {
     pub owner: i64,
     pub admin: i64,

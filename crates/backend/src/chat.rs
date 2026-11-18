@@ -10,19 +10,16 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State, rejection::BytesRejection, rejection::QueryRejection},
     http::{HeaderValue, StatusCode, header},
-    response::{
-        IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
-    },
+    response::{IntoResponse, Response},
 };
-use futures_util::StreamExt;
 use proto::{Attachment, Author, Message, SendMessageRequest, ServerEvent, limits};
 use serde::Deserialize;
-use tokio::sync::broadcast::{Receiver, error::RecvError};
 
 use crate::{
     AppState,
     error::{AppError, AppResult},
+    events::{Audience, publish},
+    perm,
     extract::{ApiJson, AuthUser},
     now, security,
 };
@@ -31,8 +28,6 @@ use crate::{
 pub const PENDING_TTL_SECS: i64 = 3600;
 /// Неотправленных картинок на пользователя.
 const PENDING_MAX: i64 = 20;
-/// Интервал пустых «пингов» SSE: держит соединение через прокси и даёт клиенту заметить обрыв.
-pub const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// Литерал (а не const), чтобы склеивать запросы через `concat!` — sqlx принимает только статические строки.
 macro_rules! select_messages {
@@ -79,16 +74,13 @@ impl From<&AttachmentRow> for Attachment {
 }
 
 /// Канал существует и он текстовый.
-async fn text_channel(state: &AppState, id: i64) -> AppResult<()> {
-    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM channels WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&state.inner.db)
-        .await?;
-    match kind.as_deref() {
-        None => Err(AppError::NotFound),
-        Some("text") => Ok(()),
-        Some(_) => Err(AppError::BadRequest("это не текстовый канал".into())),
+/// Текстовый канал сервера, где ты участник; возвращает id сервера. Чужой — NotFound.
+async fn text_channel(state: &AppState, id: i64, user_id: i64) -> AppResult<i64> {
+    let (m, ch) = perm::channel_member(&state.inner.db, id, user_id).await?;
+    if ch.kind != "text" {
+        return Err(AppError::BadRequest("это не текстовый канал".into()));
     }
+    Ok(m.server_id)
 }
 
 /// Строки сообщений → `Message` с вложениями (одним запросом на всю страницу).
@@ -143,12 +135,12 @@ pub struct HistoryQuery {
 /// Без параметров — последние `limit` сообщений.
 pub async fn list_messages(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(id): Path<i64>,
     q: Result<Query<HistoryQuery>, QueryRejection>,
 ) -> AppResult<Json<Vec<Message>>> {
     let Query(q) = q.map_err(|e| AppError::BadRequest(e.body_text()))?;
-    text_channel(&state, id).await?;
+    text_channel(&state, id, user.id).await?;
     let limit = q
         .limit
         .unwrap_or(limits::HISTORY_PAGE)
@@ -206,7 +198,7 @@ pub async fn send_message(
     Path(id): Path<i64>,
     ApiJson(req): ApiJson<SendMessageRequest>,
 ) -> AppResult<(StatusCode, Json<Message>)> {
-    text_channel(&state, id).await?;
+    let server_id = text_channel(&state, id, user.id).await?;
     state
         .inner
         .chat_limiter
@@ -262,10 +254,7 @@ pub async fn send_message(
     tx.commit().await?;
 
     let msg = load_message(&state, id, mid).await?;
-    // нет подписчиков — не ошибка
-    let _ = state.inner.events.send(ServerEvent::MessageCreated {
-        message: msg.clone(),
-    });
+    publish(&state, Audience::Server(server_id), ServerEvent::MessageCreated { message: msg.clone() });
     Ok((StatusCode::CREATED, Json(msg)))
 }
 
@@ -284,11 +273,11 @@ pub fn sniff_image(b: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn storage_path(state: &AppState, key: &str) -> std::path::PathBuf {
+pub(crate) fn storage_path(state: &AppState, key: &str) -> std::path::PathBuf {
     state.inner.uploads_dir.join(key)
 }
 
-async fn write_atomic(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_atomic(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
@@ -415,34 +404,6 @@ pub async fn get_attachment(
         HeaderValue::from_static("nosniff"),
     );
     Ok(resp)
-}
-
-/// `GET /events` — поток событий (SSE). Первое событие — `hello`; при отставании — `resync`.
-pub async fn events(State(state): State<AppState>, user: AuthUser) -> Response {
-    let rx = state.inner.events.subscribe();
-    let mut shutdown = state.inner.shutdown.subscribe();
-    tracing::debug!(user_id = user.id, "events stream opened");
-    let live = futures_util::stream::unfold(rx, |mut rx: Receiver<ServerEvent>| async move {
-        match rx.recv().await {
-            Ok(e) => Some((e, rx)),
-            Err(RecvError::Lagged(_)) => Some((ServerEvent::Resync, rx)),
-            Err(RecvError::Closed) => None,
-        }
-    });
-    let stream = futures_util::stream::iter([ServerEvent::Hello])
-        .chain(live)
-        .map(|e| Event::default().json_data(&e))
-        .take_until(async move {
-            let _ = shutdown.wait_for(|stop| *stop).await;
-        });
-    let mut resp = Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE))
-        .into_response();
-    let h = resp.headers_mut();
-    // nginx/NPM: не буферизовать поток
-    h.insert("x-accel-buffering", HeaderValue::from_static("no"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    resp
 }
 
 /// Удалить с диска файлы по ключам (после удаления строк из БД).

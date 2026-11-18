@@ -1,195 +1,21 @@
 //! Интеграционные тесты HTTP API (in-memory SQLite, без сети).
 
+mod common;
+
 use std::time::Duration;
 
 use axum::{
-    Router,
     body::Body,
     http::{Method, Request, StatusCode, header},
 };
-use backend::{AppState, config::LiveKitConfig, ratelimit::RateLimiter};
+use common::*;
 use http_body_util::BodyExt;
 use livekit_api::access_token::TokenVerifier;
 use proto::{
-    Attachment, AuthResponse, Channel, ErrorBody, Invite, JoinResponse, Message, ServerEvent, User,
+    Attachment, AuthResponse, Channel, JoinResponse, Message, ServerEvent, User,
 };
 use serde_json::{Value, json};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tower::ServiceExt;
-
-const LK_KEY: &str = "APItestkey";
-const LK_SECRET: &str = "test-secret-test-secret-test-secret-0123";
-const LK_URL: &str = "wss://lk.example.test";
-
-struct T {
-    app: Router,
-    pool: sqlx::SqlitePool,
-    state: AppState,
-    uploads: std::path::PathBuf,
-}
-
-async fn setup_with_limit(limit: u32) -> T {
-    let opts: SqliteConnectOptions = "sqlite::memory:".parse().unwrap();
-    // одно соединение — одна in-memory база на тест
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts.foreign_keys(true))
-        .await
-        .unwrap();
-    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-    let lk = LiveKitConfig {
-        public_url: LK_URL.into(),
-        api_key: LK_KEY.into(),
-        api_secret: LK_SECRET.into(),
-    };
-    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let uploads = std::env::temp_dir().join(format!(
-        "amadeus-test-uploads-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let state = AppState::with_limiter(
-        pool.clone(),
-        lk,
-        1,
-        RateLimiter::new(limit, Duration::from_secs(300)),
-        uploads.clone(),
-        uploads.join("releases"),
-    );
-    T {
-        app: backend::router(state.clone()),
-        pool,
-        state,
-        uploads,
-    }
-}
-
-impl Drop for T {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.uploads);
-    }
-}
-
-async fn setup() -> T {
-    setup_with_limit(1000).await
-}
-
-impl T {
-    async fn call(
-        &self,
-        method: Method,
-        uri: &str,
-        token: Option<&str>,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        self.call_from(method, uri, token, body, "203.0.113.1")
-            .await
-    }
-
-    async fn call_from(
-        &self,
-        method: Method,
-        uri: &str,
-        token: Option<&str>,
-        body: Option<Value>,
-        ip: &str,
-    ) -> (StatusCode, Value) {
-        let mut req = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header("x-forwarded-for", ip);
-        if let Some(t) = token {
-            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
-        }
-        let req = match body {
-            Some(b) => req
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(b.to_string())),
-            None => req.body(Body::empty()),
-        }
-        .unwrap();
-        let resp = self.app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let v = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-        };
-        (status, v)
-    }
-
-    /// Сырое тело (загрузка файла). Возвращает статус, JSON (если есть) и заголовки.
-    async fn call_raw(
-        &self,
-        method: Method,
-        uri: &str,
-        token: Option<&str>,
-        body: Vec<u8>,
-    ) -> (StatusCode, Value, axum::http::HeaderMap, Vec<u8>) {
-        let mut req = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header("x-forwarded-for", "203.0.113.1");
-        if let Some(t) = token {
-            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
-        }
-        let req = req
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = self.app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let headers = resp.headers().clone();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
-        let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, v, headers, bytes)
-    }
-
-    async fn admin(&self) -> String {
-        backend::create_user(&self.pool, "admin", "admin-password", true)
-            .await
-            .unwrap();
-        self.login("admin", "admin-password").await
-    }
-
-    async fn login(&self, name: &str, password: &str) -> String {
-        let (s, v) = self
-            .call(
-                Method::POST,
-                "/auth/login",
-                None,
-                Some(json!({"name": name, "password": password})),
-            )
-            .await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        serde_json::from_value::<AuthResponse>(v).unwrap().token
-    }
-
-    async fn invite(&self, admin: &str, body: Value) -> Invite {
-        let (s, v) = self
-            .call(Method::POST, "/invites", Some(admin), Some(body))
-            .await;
-        assert_eq!(s, StatusCode::CREATED, "{v}");
-        serde_json::from_value(v).unwrap()
-    }
-
-    async fn register(&self, code: &str, name: &str) -> (StatusCode, Value) {
-        self.call(
-            Method::POST,
-            "/auth/register",
-            None,
-            Some(json!({"invite_code": code, "name": name, "password": "password123"})),
-        )
-        .await
-    }
-}
-
-fn err(v: &Value) -> String {
-    serde_json::from_value::<ErrorBody>(v.clone())
-        .map(|e| e.error)
-        .unwrap_or_default()
-}
 
 #[tokio::test]
 async fn health() {
@@ -969,25 +795,6 @@ async fn stale_uploads_cleaned() {
 }
 
 /// Читает из SSE-потока следующее событие с данными (пропуская комментарии keep-alive).
-async fn next_event(body: &mut Body, buf: &mut String) -> ServerEvent {
-    loop {
-        if let Some(end) = buf.find("\n\n") {
-            let block: String = buf.drain(..end + 2).collect();
-            if let Some(data) = block.lines().find_map(|l| l.strip_prefix("data:")) {
-                return serde_json::from_str(data.trim()).unwrap();
-            }
-            continue;
-        }
-        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
-            .await
-            .expect("событие не пришло")
-            .expect("поток закрыт")
-            .unwrap();
-        if let Ok(data) = frame.into_data() {
-            buf.push_str(std::str::from_utf8(&data).unwrap());
-        }
-    }
-}
 
 #[tokio::test]
 async fn events_stream() {

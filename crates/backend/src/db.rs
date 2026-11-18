@@ -113,7 +113,14 @@ pub async fn create_user(
     let name = validate_name(name)?;
     validate_password(password)?;
     let hash = hash_password_async(password.to_string()).await?;
-    let id = insert_user(&mut *pool.acquire().await?, &name, &hash, is_admin).await?;
+    let mut tx = pool.begin().await?;
+    let id = insert_user(&mut tx, &name, &hash, is_admin).await?;
+    // Новый инстанс: первый админ получает первый сервер (как сервер №1 после миграции).
+    let servers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM servers").fetch_one(&mut *tx).await?;
+    if is_admin && servers == 0 {
+        crate::servers::insert_server(&mut tx, "Amadeus", id, false).await?;
+    }
+    tx.commit().await?;
     Ok(User { id, name, is_admin, display_name: None, avatar: None })
 }
 
@@ -142,6 +149,7 @@ pub(crate) async fn insert_user(
 /// Создать инвайт. `expires_in_hours = 0` — бессрочно.
 pub async fn create_invite(
     pool: &SqlitePool,
+    server_id: i64,
     created_by: i64,
     uses: u32,
     expires_in_hours: u32,
@@ -159,16 +167,17 @@ pub async fn create_invite(
     }
     let expires_at = (expires_in_hours > 0).then(|| now() + i64::from(expires_in_hours) * 3600);
     let code = security::new_invite_code();
-    sqlx::query("INSERT INTO invites (code, created_by, uses_left, expires_at, created_at) VALUES (?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO invites (code, created_by, uses_left, expires_at, created_at, server_id) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&code)
         .bind(created_by)
         .bind(uses)
         .bind(expires_at)
         .bind(now())
+        .bind(server_id)
         .execute(pool)
         .await?;
     Ok(Invite {
-        server_id: 1,
+        server_id,
         code,
         uses_left: uses,
         expires_at,

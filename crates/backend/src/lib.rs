@@ -8,6 +8,10 @@ pub mod security;
 
 pub mod chat;
 mod db;
+pub mod events;
+mod images;
+mod servers;
+pub mod voice;
 mod extract;
 pub(crate) mod perm;
 mod releases;
@@ -17,7 +21,6 @@ mod routes;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use proto::ServerEvent;
 use tokio::sync::{broadcast, watch};
 
 pub use db::{backup, connect, create_invite, create_user};
@@ -56,8 +59,12 @@ pub struct Inner {
     pub uploads_dir: PathBuf,
     /// Выпуски клиента (`latest.json` + файлы), см. `releases.rs`.
     pub releases_dir: PathBuf,
-    /// События для `GET /events` (рассылка всем подключённым).
-    pub events: broadcast::Sender<ServerEvent>,
+    /// События для `GET /events` (каждое — со своей аудиторией).
+    pub events: broadcast::Sender<events::Scoped>,
+    /// Комнаты LiveKit (RoomService); по умолчанию — заглушка.
+    pub rooms: Arc<dyn voice::Rooms>,
+    /// Кто сейчас в голосовых каналах.
+    pub presence: voice::Presence,
     /// true — сервис останавливается: потоки SSE закрываются (иначе graceful shutdown ждал бы их вечно).
     pub shutdown: watch::Sender<bool>,
 }
@@ -99,9 +106,17 @@ impl AppState {
                 uploads_dir,
                 releases_dir,
                 events: broadcast::channel(256).0,
+                rooms: Arc::new(voice::NoRooms),
+                presence: voice::Presence::default(),
                 shutdown: watch::channel(false).0,
             }),
         }
+    }
+
+    /// Подключить RoomService (сразу после создания состояния).
+    pub fn with_rooms(mut self, rooms: Arc<dyn voice::Rooms>) -> Self {
+        Arc::get_mut(&mut self.inner).expect("with_rooms до клонирования состояния").rooms = rooms;
+        self
     }
 
     /// Закрыть потоки событий (перед остановкой сервиса).
