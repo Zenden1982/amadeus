@@ -6,7 +6,10 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use proto::{CreateServerRequest, Member, PublicUser, Role, Server, ServerEvent, TransferRequest, UpdateServerRequest, limits, perm};
+use proto::{
+    Ban, BanRequest, CreateServerRequest, Member, PublicUser, Role, Server, ServerEvent, SetRoleRequest, TransferRequest,
+    UpdateServerRequest, limits, perm,
+};
 
 use crate::{
     AppState,
@@ -299,4 +302,115 @@ pub async fn leave(State(state): State<AppState>, user: AuthUser, Path(id): Path
     }
     drop_member(&state, id, user.id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------- роли и модерация
+
+/// Я и цель на сервере; действовать можно только над ролью строго ниже своей.
+async fn me_and_target(state: &AppState, server_id: i64, user: &AuthUser, target: i64, need: u32) -> AppResult<(MemberCtx, MemberCtx)> {
+    let me = me_on(state, server_id, user).await?;
+    me.require(need)?;
+    let t = p::member(&state.inner.db, server_id, target).await?;
+    if !me.can_act_on(&t) {
+        return Err(AppError::Forbidden);
+    }
+    Ok((me, t))
+}
+
+/// `PUT /servers/{id}/members/{uid}/role`
+pub async fn set_role(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, uid)): Path<(i64, i64)>,
+    ApiJson(req): ApiJson<SetRoleRequest>,
+) -> AppResult<Json<Member>> {
+    let (me, _) = me_and_target(&state, id, &user, uid, perm::MANAGE_ROLES).await?;
+    let pos: Option<i32> = sqlx::query_scalar("SELECT position FROM server_roles WHERE id = ? AND server_id = ?")
+        .bind(req.role_id)
+        .bind(id)
+        .fetch_optional(&state.inner.db)
+        .await?;
+    let pos = pos.ok_or_else(|| AppError::BadRequest("нет такой роли на сервере".into()))?;
+    if !me.can_assign(pos) {
+        return Err(AppError::Forbidden);
+    }
+    sqlx::query("UPDATE server_members SET role_id = ? WHERE server_id = ? AND user_id = ?")
+        .bind(req.role_id)
+        .bind(id)
+        .bind(uid)
+        .execute(&state.inner.db)
+        .await?;
+    tracing::info!(server_id = id, by = user.id, user_id = uid, role_id = req.role_id, "role changed");
+    publish_member(&state, id, uid).await?;
+    // у самого человека меняется my_role_id в сервере
+    let server = server_for(&state.inner.db, id, uid).await?;
+    publish(&state, Audience::User(uid), ServerEvent::ServerUpserted { server });
+    Ok(Json(member_json(&state.inner.db, id, uid).await?))
+}
+
+/// `DELETE /servers/{id}/members/{uid}` — кик.
+pub async fn kick(State(state): State<AppState>, user: AuthUser, Path((id, uid)): Path<(i64, i64)>) -> AppResult<StatusCode> {
+    me_and_target(&state, id, &user, uid, perm::KICK).await?;
+    drop_member(&state, id, uid).await?;
+    tracing::info!(server_id = id, by = user.id, user_id = uid, "kicked");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /servers/{id}/members/{uid}/disconnect` — выкинуть из голоса, оставив на сервере.
+pub async fn disconnect(State(state): State<AppState>, user: AuthUser, Path((id, uid)): Path<(i64, i64)>) -> AppResult<StatusCode> {
+    me_and_target(&state, id, &user, uid, perm::DISCONNECT).await?;
+    voice::kick_from_server_voice(&state, id, uid).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /servers/{id}/bans`
+pub async fn bans(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<Json<Vec<Ban>>> {
+    me_on(&state, id, &user).await?.require(perm::BAN)?;
+    type Row = (i64, String, Option<String>, Option<String>, i64, Option<String>, i64);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT u.id, u.name, u.display_name, u.avatar_key, b.by_user, b.reason, b.created_at
+         FROM server_bans b JOIN users u ON u.id = b.user_id WHERE b.server_id = ? ORDER BY b.created_at DESC",
+    )
+    .bind(id)
+    .fetch_all(&state.inner.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(uid, name, display_name, avatar, by, reason, created_at)| Ban {
+                user: PublicUser { id: uid, name, display_name, avatar },
+                by,
+                reason,
+                created_at,
+            })
+            .collect(),
+    ))
+}
+
+/// `POST /servers/{id}/bans` — бан: вылет с сервера и из голоса, вернуться нельзя.
+pub async fn ban(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>, ApiJson(req): ApiJson<BanRequest>) -> AppResult<StatusCode> {
+    me_and_target(&state, id, &user, req.user_id, perm::BAN).await?;
+    let reason = req.reason.map(|r| r.trim().chars().take(200).collect::<String>()).filter(|r| !r.is_empty());
+    sqlx::query("INSERT OR REPLACE INTO server_bans (server_id, user_id, by_user, reason, created_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(id)
+        .bind(req.user_id)
+        .bind(user.id)
+        .bind(reason)
+        .bind(now())
+        .execute(&state.inner.db)
+        .await?;
+    drop_member(&state, id, req.user_id).await?;
+    tracing::info!(server_id = id, by = user.id, user_id = req.user_id, "banned");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /servers/{id}/bans/{uid}`
+pub async fn unban(State(state): State<AppState>, user: AuthUser, Path((id, uid)): Path<(i64, i64)>) -> AppResult<StatusCode> {
+    me_on(&state, id, &user).await?.require(perm::BAN)?;
+    let n = sqlx::query("DELETE FROM server_bans WHERE server_id = ? AND user_id = ?")
+        .bind(id)
+        .bind(uid)
+        .execute(&state.inner.db)
+        .await?
+        .rows_affected();
+    if n == 0 { Err(AppError::NotFound) } else { Ok(StatusCode::NO_CONTENT) }
 }

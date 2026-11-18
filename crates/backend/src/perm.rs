@@ -26,13 +26,11 @@ impl MemberCtx {
     }
 
     /// Действовать над человеком (кик, бан, роль, выкинуть из голоса) — только если его роль строго ниже.
-    #[allow(dead_code)] // задача 7
     pub fn can_act_on(&self, target: &MemberCtx) -> bool {
         !target.is_owner && (self.is_owner || target.position < self.position)
     }
 
     /// Назначить роль можно только строго ниже своей; «Владелец» (позиция 3) — никогда.
-    #[allow(dead_code)] // задача 7
     pub fn can_assign(&self, role_position: i32) -> bool {
         role_position < OWNER_POSITION && role_position < self.position
     }

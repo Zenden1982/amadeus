@@ -304,3 +304,124 @@ async fn legacy_post_invites_targets_server_1() {
     let tok = serde_json::from_value::<proto::AuthResponse>(v).unwrap().token;
     assert_eq!(servers_of(&t, &tok).await[0].id, 1);
 }
+
+// ------------------------------------------------------------------ роли и модерация (задача 7)
+
+fn role_id(srv: &Server, position: i32) -> i64 {
+    srv.roles.iter().find(|r| r.position == position).unwrap().id
+}
+
+async fn set_role(t: &T, tok: &str, srv: &Server, uid: i64, position: i32) -> StatusCode {
+    t.call(Method::PUT, &format!("/servers/{}/members/{uid}/role", srv.id), Some(tok), Some(json!({"role_id": role_id(srv, position)})))
+        .await
+        .0
+}
+
+/// Сервер с владельцем, админом, модератором и участником.
+async fn crew(t: &T) -> (Server, [(String, i64); 4]) {
+    let o = t.user("okabe").await;
+    let a = t.user("kurisu").await;
+    let m = t.user("daru").await;
+    let u = t.user("mayuri").await;
+    let srv = t.create_server(&o.0, "Лаб").await;
+    t.add_member(srv.id, a.1, 2).await;
+    t.add_member(srv.id, m.1, 1).await;
+    t.add_member(srv.id, u.1, 0).await;
+    (srv, [o, a, m, u])
+}
+
+#[tokio::test]
+async fn admin_promotes_to_moderator_not_admin() {
+    let t = setup().await;
+    let (srv, [_, a, _, u]) = crew(&t).await;
+    assert_eq!(set_role(&t, &a.0, &srv, u.1, 2).await, StatusCode::FORBIDDEN);
+    assert_eq!(set_role(&t, &a.0, &srv, u.1, 1).await, StatusCode::OK);
+    let (_, v) = t.call(Method::GET, &format!("/servers/{}/members", srv.id), Some(&a.0), None).await;
+    let ms: Vec<Member> = serde_json::from_value(v).unwrap();
+    assert_eq!(ms.iter().find(|m| m.user.id == u.1).unwrap().role_id, role_id(&srv, 1));
+}
+
+#[tokio::test]
+async fn admin_cannot_demote_admin_owner_can() {
+    let t = setup().await;
+    let (srv, [o, a, _, u]) = crew(&t).await;
+    assert_eq!(set_role(&t, &o.0, &srv, u.1, 2).await, StatusCode::OK, "владелец назначает админа");
+    assert_eq!(set_role(&t, &a.0, &srv, u.1, 0).await, StatusCode::FORBIDDEN, "админ не снимает админа");
+    assert_eq!(set_role(&t, &o.0, &srv, u.1, 0).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn owner_role_not_assignable() {
+    let t = setup().await;
+    let (srv, [o, _, _, u]) = crew(&t).await;
+    assert_eq!(set_role(&t, &o.0, &srv, u.1, 3).await, StatusCode::FORBIDDEN);
+    assert_eq!(set_role(&t, &o.0, &srv, o.1, 0).await, StatusCode::FORBIDDEN, "себя/владельца не трогаем");
+}
+
+#[tokio::test]
+async fn moderator_kicks_member_not_admin() {
+    let t = setup().await;
+    let (srv, [_, a, m, u]) = crew(&t).await;
+    let kick = |uid: i64| format!("/servers/{}/members/{uid}", srv.id);
+    assert_eq!(t.call(Method::DELETE, &kick(a.1), Some(&m.0), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(t.call(Method::DELETE, &kick(m.1), Some(&u.0), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(t.call(Method::DELETE, &kick(u.1), Some(&m.0), None).await.0, StatusCode::NO_CONTENT);
+    assert!(servers_of(&t, &u.0).await.is_empty());
+    // кикнутый может вернуться по приглашению
+    let inv = new_invite(&t, &m.0, srv.id, 1).await;
+    assert_eq!(t.call(Method::POST, &format!("/invites/{}/join", inv.code), Some(&u.0), None).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn kick_removes_from_voice() {
+    let t = setup().await;
+    let (srv, [o, _, _, u]) = crew(&t).await;
+    let room = format!("srv-{}-ch-99", srv.id);
+    t.set_voice(&room, &[u.1, o.1]).await;
+    assert_eq!(t.call(Method::DELETE, &format!("/servers/{}/members/{}", srv.id, u.1), Some(&o.0), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(t.removed(), vec![(room, u.1.to_string())]);
+}
+
+#[tokio::test]
+async fn disconnect_only_from_voice() {
+    let t = setup().await;
+    let (srv, [_, a, m, u]) = crew(&t).await;
+    let room = format!("srv-{}-ch-7", srv.id);
+    t.set_voice(&room, &[u.1, a.1]).await;
+    let dc = |uid: i64| format!("/servers/{}/members/{uid}/disconnect", srv.id);
+    assert_eq!(t.call(Method::POST, &dc(a.1), Some(&m.0), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(t.call(Method::POST, &dc(u.1), Some(&m.0), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(t.removed(), vec![(room, u.1.to_string())]);
+    assert_eq!(servers_of(&t, &u.0).await.len(), 1, "остался на сервере");
+}
+
+#[tokio::test]
+async fn ban_removes_and_blocks_rejoin() {
+    let t = setup().await;
+    let (srv, [o, _, m, u]) = crew(&t).await;
+    let room = format!("srv-{}-ch-5", srv.id);
+    t.set_voice(&room, &[u.1]).await;
+    let bans = format!("/servers/{}/bans", srv.id);
+    let (s, _) = t.call(Method::POST, &bans, Some(&m.0), Some(json!({"user_id": u.1, "reason": "спам"}))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(servers_of(&t, &u.0).await.is_empty());
+    assert_eq!(t.removed(), vec![(room, u.1.to_string())]);
+    let (s, v) = t.call(Method::GET, &bans, Some(&m.0), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let list: Vec<proto::Ban> = serde_json::from_value(v).unwrap();
+    assert_eq!((list[0].user.id, list[0].reason.as_deref()), (u.1, Some("спам")));
+    let inv = new_invite(&t, &o.0, srv.id, 1).await;
+    let (s, v) = t.call(Method::POST, &format!("/invites/{}/join", inv.code), Some(&u.0), None).await;
+    assert_eq!((s, err(&v)), (StatusCode::FORBIDDEN, "banned".to_string()));
+    // разбан — можно вернуться
+    assert_eq!(t.call(Method::DELETE, &format!("{bans}/{}", u.1), Some(&m.0), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(t.call(Method::POST, &format!("/invites/{}/join", inv.code), Some(&u.0), None).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn member_cannot_ban() {
+    let t = setup().await;
+    let (srv, [_, _, m, u]) = crew(&t).await;
+    let (s, _) = t.call(Method::POST, &format!("/servers/{}/bans", srv.id), Some(&u.0), Some(json!({"user_id": m.1}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
