@@ -29,7 +29,7 @@ enum Tab {
 pub enum Action {
     None,
     Cancel,
-    Start { source: SourceId, title: String, width: u32, height: u32, preset: Preset },
+    Start { source: SourceId, title: String, width: u32, height: u32, preset: Preset, audio: bool },
 }
 
 pub struct Picker {
@@ -39,12 +39,14 @@ pub struct Picker {
     tex: HashMap<SourceId, (Option<TextureHandle>, Option<TextureHandle>)>,
     selected: Option<SourceId>,
     pub preset: Preset,
+    /// Передавать звук окна/системы.
+    pub audio: bool,
     /// Уже транслируем — кнопка «Переключить».
     switching: bool,
 }
 
 impl Picker {
-    pub fn open(ctx: &egui::Context, preset: Preset, current: Option<SourceId>) -> Self {
+    pub fn open(ctx: &egui::Context, preset: Preset, audio: bool, current: Option<SourceId>) -> Self {
         let mut p = Picker {
             tab: if matches!(current, Some(SourceId::Monitor(_))) { Tab::Screens } else { Tab::Windows },
             rx: None,
@@ -52,6 +54,7 @@ impl Picker {
             tex: HashMap::new(),
             selected: current,
             preset,
+            audio,
             switching: current.is_some(),
         };
         p.reload(ctx);
@@ -206,7 +209,7 @@ impl Picker {
                         select = Some(s.id);
                     }
                     if resp.double_clicked() {
-                        out = Some(Action::Start { source: s.id, title: s.title.clone(), width: s.width, height: s.height, preset: self.preset });
+                        out = Some(Action::Start { source: s.id, title: s.title.clone(), width: s.width, height: s.height, preset: self.preset, audio: self.audio });
                     }
                     resp.on_hover_text(&s.title).on_hover_cursor(egui::CursorIcon::PointingHand);
                 }
@@ -287,12 +290,19 @@ impl Picker {
                     ui.selectable_value(&mut self.preset, p, p.label());
                 }
             });
+            ui.add_space(14.0);
+            let hint = if self.tab == Tab::Screens {
+                "Весь звук компьютера, кроме голосов из Amadeus"
+            } else {
+                "Только звук выбранного приложения (музыка и Discord в других окнах не попадут)"
+            };
+            ui.checkbox(&mut self.audio, RichText::new("Передавать звук").size(13.0)).on_hover_text(hint);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if self.switching { "Переключить" } else { "Начать трансляцию" };
                 let chosen = self.selected.and_then(|id| self.sources.as_ref()?.iter().find(|s| s.id == id));
                 if t::primary_button(ui, label, 210.0, chosen.is_some()).clicked()
                     && let Some(s) = chosen {
-                        out = Some(Action::Start { source: s.id, title: s.title.clone(), width: s.width, height: s.height, preset: self.preset });
+                        out = Some(Action::Start { source: s.id, title: s.title.clone(), width: s.width, height: s.height, preset: self.preset, audio: self.audio });
                     }
                 ui.add_space(6.0);
                 if ui.button("Отмена").clicked() {

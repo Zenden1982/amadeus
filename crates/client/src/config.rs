@@ -38,6 +38,10 @@ pub struct Settings {
     pub user_muted: HashMap<String, bool>,
     /// Качество трансляции по умолчанию (последнее выбранное).
     pub stream_preset: Preset,
+    /// Передавать звук окна/системы в трансляции.
+    pub stream_audio: bool,
+    /// Громкость звука трансляций участников по identity (отдельно от голоса).
+    pub stream_volume: HashMap<String, f32>,
 }
 
 impl Default for Settings {
@@ -57,6 +61,8 @@ impl Default for Settings {
             user_volume: HashMap::new(),
             user_muted: HashMap::new(),
             stream_preset: Preset::default(),
+            stream_audio: true,
+            stream_volume: HashMap::new(),
         }
     }
 }
@@ -99,6 +105,10 @@ impl Settings {
 
     pub fn volume_of(&self, identity: &str) -> f32 {
         self.user_volume.get(identity).copied().unwrap_or(1.0)
+    }
+
+    pub fn stream_volume_of(&self, identity: &str) -> f32 {
+        self.stream_volume.get(identity).copied().unwrap_or(1.0)
     }
 
     pub fn is_user_muted(&self, identity: &str) -> bool {

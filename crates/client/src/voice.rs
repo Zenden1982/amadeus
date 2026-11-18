@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use capture_win::{Event as CapEvent, SourceId};
 use livekit::options::{AudioEncoding, TrackPublishOptions};
+use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::prelude::*;
 use livekit::webrtc::stats::RtcStats;
@@ -37,6 +38,8 @@ pub enum Cmd {
     PttHeld(bool),
     /// identity → громкость (1.0 = 100%, 0 = заглушён).
     SetUserVolume(String, f32),
+    /// identity → громкость звука его трансляции (1.0 = 100%).
+    SetStreamVolume(String, f32),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
     SetProcessing { aec: bool, ns: bool, agc: bool },
@@ -45,7 +48,8 @@ pub enum Cmd {
     /// Новый API-клиент (после входа/смены сервера).
     SetApi(Api),
     /// Начать трансляцию или сменить источник на лету (тот же трек, без переподключения).
-    StartStream { source: SourceId, title: String, width: u32, height: u32, preset: Preset },
+    /// `audio` — передавать звук окна/системы (фаза 5).
+    StartStream { source: SourceId, title: String, width: u32, height: u32, preset: Preset, audio: bool },
     StopStream,
     DismissStreamNotice,
 }
@@ -116,6 +120,16 @@ pub struct StreamInfo {
     pub fps: f64,
     pub kbps: f64,
     pub limitation: Option<String>,
+    pub audio: AudioStatus,
+}
+
+/// Звук трансляции (для интерфейса).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AudioStatus {
+    Off,
+    /// Захватывается: «звук приложения» / «весь звук, кроме Amadeus».
+    On(&'static str),
+    Failed(String),
 }
 
 impl Default for VoiceState {
@@ -172,6 +186,8 @@ pub struct AudioPrefs {
     pub ptt_enabled: bool,
     pub sounds: bool,
     pub volumes: HashMap<String, f32>,
+    /// Громкость звука трансляций по identity.
+    pub stream_volumes: HashMap<String, f32>,
 }
 
 pub fn spawn(rt: &tokio::runtime::Handle, api: Api, prefs: AudioPrefs, repaint: Arc<dyn Fn() + Send + Sync>) -> VoiceHandle {
@@ -241,6 +257,15 @@ struct Streaming {
     preset: Preset,
     /// Аппаратный путь (pre-encoded H.264).
     hw: bool,
+    publication: Option<LocalTrackPublication>,
+    /// Звук окна/системы (фаза 5); None — не передаётся.
+    audio: Option<StreamSound>,
+}
+
+/// Звук трансляции: источник живёт дольше публикации (переподключение), захват меняется со сменой окна.
+struct StreamSound {
+    capture: Option<capture_win::AppAudio>,
+    source: NativeAudioSource,
     publication: Option<LocalTrackPublication>,
 }
 
@@ -471,6 +496,10 @@ impl Engine {
                 self.prefs.volumes.insert(id.clone(), v);
                 self.apply_volume_for(&id);
             }
+            Cmd::SetStreamVolume(id, v) => {
+                self.prefs.stream_volumes.insert(id.clone(), v);
+                self.apply_volume_for(&id);
+            }
             Cmd::SetInputDevice(id) => self.apply_input(id),
             Cmd::SetOutputDevice(id) => self.apply_output(id),
             Cmd::SetProcessing { aec, ns, agc } => {
@@ -482,8 +511,8 @@ impl Engine {
             Cmd::SetSounds(on) => self.prefs.sounds = on,
             Cmd::RefreshDevices => self.refresh_devices(),
             Cmd::SetApi(api) => self.api = api,
-            Cmd::StartStream { source, title, width, height, preset } => {
-                self.start_stream(source, title, width, height, preset).await
+            Cmd::StartStream { source, title, width, height, preset, audio } => {
+                self.start_stream(source, title, width, height, preset, audio).await
             }
             Cmd::StopStream => self.stop_stream().await,
             Cmd::DismissStreamNotice => self.set(|s| s.stream_notice = None),
@@ -568,6 +597,12 @@ impl Engine {
                 Ok(p) => st.publication = Some(p),
                 Err(e) => log::error!("повторная публикация трансляции: {e}"),
             }
+            if let Some(a) = &mut st.audio {
+                match stream::publish_audio(&room, &a.source).await {
+                    Ok(p) => a.publication = Some(p),
+                    Err(e) => log::error!("повторная публикация звука трансляции: {e}"),
+                }
+            }
         }
         for p in room.remote_participants().values() {
             for publication in p.track_publications().values() {
@@ -586,6 +621,9 @@ impl Engine {
         self.mic = None;
         if let Some(st) = &mut self.stream {
             st.publication = None;
+            if let Some(a) = &mut st.audio {
+                a.publication = None;
+            }
         }
         self.room = None;
     }
@@ -594,6 +632,9 @@ impl Engine {
         self.mic = None;
         if let Some(st) = &mut self.stream {
             st.publication = None;
+            if let Some(a) = &mut st.audio {
+                a.publication = None;
+            }
         }
         if let Some((room, _)) = self.room.take()
             && let Err(e) = room.close().await {
@@ -633,11 +674,11 @@ impl Engine {
                 self.play(Sound::LeaveOther);
                 self.refresh_peers(false);
             }
-            RoomEvent::TrackSubscribed { track, participant, .. } => {
+            RoomEvent::TrackSubscribed { track, publication, participant } => {
                 match track {
                     RemoteTrack::Audio(a) => {
-                        let v = self.volume_for(participant.identity().as_str());
-                        log::info!("подписка на аудио {} (громкость {v})", participant.identity());
+                        let v = self.volume_for(participant.identity().as_str(), publication.source());
+                        log::info!("подписка на аудио {} {:?} (громкость {v})", participant.identity(), publication.source());
                         a.rtc_track().set_volume(v as f64);
                     }
                     RemoteTrack::Video(v) => {
@@ -720,6 +761,7 @@ impl Engine {
         // Одна PeerConnection на всё (LiveKit 1.13) — входящие тоже в publisher_stats.
         self.log_inbound_video(&stats.subscriber_stats);
         self.log_inbound_video(&stats.publisher_stats);
+        self.log_audio(&stats.publisher_stats);
         let rtt = stats
             .publisher_stats
             .iter()
@@ -739,7 +781,7 @@ impl Engine {
 
     // ---------------------------------------------------------------- трансляция
 
-    async fn start_stream(&mut self, source: SourceId, title: String, width: u32, height: u32, preset: Preset) {
+    async fn start_stream(&mut self, source: SourceId, title: String, width: u32, height: u32, preset: Preset, audio: bool) {
         if self.room.is_none() {
             return;
         }
@@ -766,6 +808,7 @@ impl Engine {
                                 info.size = None;
                             }
                         });
+                        self.set_stream_audio(source, audio).await;
                         return;
                     }
                     Err(e) => {
@@ -806,6 +849,7 @@ impl Engine {
             preset,
             hw: started.hw,
             publication: Some(publication),
+            audio: None,
         });
         self.set(|s| {
             s.stream = Some(StreamInfo {
@@ -819,15 +863,74 @@ impl Engine {
                 fps: 0.0,
                 kbps: 0.0,
                 limitation: None,
+                audio: AudioStatus::Off,
             })
         });
+        self.set_stream_audio(source, audio).await;
         self.refresh_peers(false);
+    }
+
+    /// Включает/выключает/перенацеливает звук трансляции. Ошибка звука трансляцию не останавливает.
+    async fn set_stream_audio(&mut self, source: SourceId, want: bool) {
+        let Some(st) = &mut self.stream else { return };
+        let room = self.room.as_ref().map(|(r, _)| r);
+        if let Some(c) = st.audio.as_mut().and_then(|a| a.capture.take()) {
+            tokio::task::block_in_place(|| c.stop());
+        }
+        if !want {
+            if let Some(a) = st.audio.take()
+                && let (Some(p), Some(room)) = (a.publication, room)
+                && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await
+            {
+                log::warn!("снятие звука трансляции: {e}");
+            }
+            self.set(|s| {
+                if let Some(i) = &mut s.stream {
+                    i.audio = AudioStatus::Off;
+                }
+            });
+            return;
+        }
+        let a = st.audio.get_or_insert_with(|| StreamSound { capture: None, source: stream::new_audio_source(), publication: None });
+        let status = match tokio::task::block_in_place(|| stream::start_audio(source, &a.source)) {
+            Ok(c) => {
+                a.capture = Some(c);
+                if a.publication.is_none()
+                    && let Some(room) = room
+                {
+                    match stream::publish_audio(room, &a.source).await {
+                        Ok(p) => a.publication = Some(p),
+                        Err(e) => log::error!("публикация звука трансляции: {e}"),
+                    }
+                }
+                AudioStatus::On(if source.is_window() { "звук приложения" } else { "весь звук, кроме Amadeus" })
+            }
+            Err(e) => {
+                log::error!("звук трансляции: {e}");
+                AudioStatus::Failed(e)
+            }
+        };
+        self.set(|s| {
+            if let Some(i) = &mut s.stream {
+                i.audio = status;
+            }
+        });
     }
 
     async fn stop_stream(&mut self) {
         let Some(mut st) = self.stream.take() else { return };
         if let Some(c) = st.capture.take() {
             tokio::task::block_in_place(|| c.stop());
+        }
+        if let Some(mut a) = st.audio.take() {
+            if let Some(c) = a.capture.take() {
+                tokio::task::block_in_place(|| c.stop());
+            }
+            if let (Some(p), Some((room, _))) = (a.publication.take(), &self.room)
+                && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await
+            {
+                log::warn!("снятие звука трансляции: {e}");
+            }
         }
         if let (Some(p), Some((room, _))) = (st.publication.take(), &self.room)
             && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await {
@@ -862,6 +965,45 @@ impl Engine {
             CapEvent::Error(e) => {
                 self.stop_stream().await;
                 self.set(|s| s.stream_notice = Some(format!("Трансляция остановлена: {e}")));
+            }
+        }
+    }
+
+    /// Аудиопотоки в лог (раз в 5 опросов): кодек/каналы/fmtp, байты, потери и «заплатки» у приёмника.
+    fn log_audio(&self, stats: &[RtcStats]) {
+        if !self.stats_n.is_multiple_of(5) {
+            return;
+        }
+        let codec = |id: &str| {
+            stats.iter().find_map(|s| match s {
+                RtcStats::Codec(c) if c.rtc.id == id => Some(format!("{}/{}ch [{}]", c.codec.mime_type, c.codec.channels, c.codec.sdp_fmtp_line)),
+                _ => None,
+            })
+        };
+        for s in stats {
+            match s {
+                RtcStats::OutboundRtp(o) if o.stream.kind == "audio" => log::info!(
+                    "исходящее аудио ssrc {}: {:?}, отправлено {} пакетов / {} КБ",
+                    o.stream.ssrc,
+                    codec(&o.stream.codec_id),
+                    o.sent.packets_sent,
+                    o.sent.bytes_sent / 1024
+                ),
+                RtcStats::MediaSource(m) if m.source.kind == "audio" => {
+                    log::info!("источник аудио {}: уровень {:.3}, энергия {:.2}", m.source.track_identifier, m.audio.audio_level, m.audio.total_audio_energy)
+                }
+                RtcStats::InboundRtp(i) if i.stream.kind == "audio" => log::info!(
+                    "входящее аудио ssrc {}: {:?}, принято {} пакетов / {} КБ, потеряно {}, сэмплов {} (заплаток {}), уровень {:.3}",
+                    i.stream.ssrc,
+                    codec(&i.stream.codec_id),
+                    i.received.packets_received,
+                    i.inbound.bytes_received / 1024,
+                    i.received.packets_lost,
+                    i.inbound.total_samples_received,
+                    i.inbound.concealed_samples,
+                    i.inbound.audio_level
+                ),
+                _ => {}
             }
         }
     }
@@ -978,20 +1120,24 @@ impl Engine {
         self.refresh_peers(false);
     }
 
-    fn volume_for(&self, identity: &str) -> f32 {
-        if self.deafened { 0.0 } else { self.prefs.volumes.get(identity).copied().unwrap_or(1.0) }
+    /// Громкость дорожки: голос и звук трансляции регулируются отдельно.
+    fn volume_for(&self, identity: &str, source: TrackSource) -> f32 {
+        if self.deafened {
+            return 0.0;
+        }
+        let map = if source == TrackSource::ScreenshareAudio { &self.prefs.stream_volumes } else { &self.prefs.volumes };
+        map.get(identity).copied().unwrap_or(1.0)
     }
 
     fn apply_volume_for(&self, identity: &str) {
         let Some((room, _)) = &self.room else { return };
-        let v = self.volume_for(identity);
         for (id, p) in room.remote_participants() {
             if id.as_str() != identity {
                 continue;
             }
             for publication in p.track_publications().values() {
                 if let Some(RemoteTrack::Audio(a)) = publication.track() {
-                    a.rtc_track().set_volume(v as f64);
+                    a.rtc_track().set_volume(self.volume_for(identity, publication.source()) as f64);
                 }
             }
         }
@@ -1000,10 +1146,9 @@ impl Engine {
     fn apply_volumes(&self) {
         let Some((room, _)) = &self.room else { return };
         for (id, p) in room.remote_participants() {
-            let v = self.volume_for(id.as_str());
             for publication in p.track_publications().values() {
                 if let Some(RemoteTrack::Audio(a)) = publication.track() {
-                    a.rtc_track().set_volume(v as f64);
+                    a.rtc_track().set_volume(self.volume_for(id.as_str(), publication.source()) as f64);
                 }
             }
         }

@@ -837,6 +837,7 @@ dependencies = [
  "msvc-shim",
  "windows",
  "windows-capture",
+ "windows-core",
 ]
 
 [[package]]

@@ -3,8 +3,11 @@
 use std::sync::Arc;
 
 use capture_win::hw::{EncodedSink, HwCapture};
-use capture_win::{Capture, CaptureConfig, Event, I420Buffer, Sink, SourceId};
-use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoderBackend, VideoEncoding};
+use capture_win::{AppAudio, AudioSink, AudioTarget, Capture, CaptureConfig, Event, I420Buffer, Sink, SourceId, app_audio};
+use livekit::options::{AudioEncoding, TrackPublishOptions, VideoCodec, VideoEncoderBackend, VideoEncoding};
+use livekit::webrtc::audio_frame::AudioFrame;
+use livekit::webrtc::audio_source::native::NativeAudioSource;
+use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
 use livekit::prelude::*;
 use livekit::webrtc::video_frame::{
     EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame, VideoBuffer, VideoFrame, VideoRotation,
@@ -236,4 +239,65 @@ pub fn restart(
     } else {
         Capture::start(id, preset.config(), sink(video, generation, events)).map(AnyCapture::Cpu)
     }
+}
+
+// ------------------------------------------------------------------ звук трансляции (фаза 5)
+
+/// Битрейт звука трансляции: Opus стерео, музыка/игры без заметных потерь
+/// (с RED в сети выходит примерно вдвое больше — ~256 кбит/с).
+pub const AUDIO_BITRATE: u64 = 128_000;
+
+/// Источник звука трансляции: 48 кГц стерео, **без** голосовой обработки (AEC/NS/AGC превращают музыку в кашу),
+/// без очереди — кадры по 10 мс уходят сразу в кодер (темп держит поток захвата).
+pub fn new_audio_source() -> NativeAudioSource {
+    NativeAudioSource::new(
+        AudioSourceOptions { echo_cancellation: false, noise_suppression: false, auto_gain_control: false },
+        app_audio::SAMPLE_RATE,
+        app_audio::CHANNELS,
+        0,
+    )
+}
+
+pub async fn publish_audio(room: &Room, source: &NativeAudioSource) -> RoomResult<LocalTrackPublication> {
+    let track = LocalAudioTrack::create_audio_track("screen-audio", RtcAudioSource::Native(source.clone()));
+    let opts = TrackPublishOptions {
+        source: TrackSource::ScreenshareAudio,
+        audio_encoding: Some(AudioEncoding { max_bitrate: AUDIO_BITRATE }),
+        // DTX выключен: на тихих местах музыки он «рвёт» звук; RED — защита от потерь.
+        dtx: false,
+        red: true,
+        ..Default::default()
+    };
+    room.local_participant().publish_track(LocalTrack::Audio(track), opts).await
+}
+
+/// Кадры захвата → NativeAudioSource (быстрый путь без очереди: capture_frame завершается сразу).
+struct LkAudioSink {
+    source: NativeAudioSource,
+    errors: std::sync::atomic::AtomicU32,
+}
+
+impl AudioSink for LkAudioSink {
+    fn frame(&self, data: &[i16]) {
+        let f = AudioFrame {
+            data: std::borrow::Cow::Borrowed(data),
+            sample_rate: app_audio::SAMPLE_RATE,
+            num_channels: app_audio::CHANNELS,
+            samples_per_channel: app_audio::FRAME as u32,
+        };
+        let fut = std::pin::pin!(self.source.capture_frame(&f));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        if let std::task::Poll::Ready(Err(e)) = std::future::Future::poll(fut, &mut cx)
+            && self.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3
+        {
+            log::warn!("звук трансляции → WebRTC: {e}");
+        }
+    }
+}
+
+/// Запуск захвата звука для источника трансляции (окно → его приложение, экран → всё, кроме Amadeus).
+pub fn start_audio(id: SourceId, source: &NativeAudioSource) -> Result<AppAudio, String> {
+    let target = AudioTarget::for_source(id).ok_or("не удалось определить процесс окна")?;
+    let sink = Arc::new(LkAudioSink { source: source.clone(), errors: Default::default() });
+    AppAudio::start(target, sink)
 }

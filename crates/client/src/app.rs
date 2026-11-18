@@ -114,6 +114,7 @@ impl App {
             ptt_enabled: settings.ptt_enabled,
             sounds: settings.sounds,
             volumes: settings.user_volume.keys().map(|k| (k.clone(), settings.effective_volume(k))).collect::<HashMap<_, _>>(),
+            stream_volumes: settings.stream_volume.clone(),
         };
         let voice = voice::spawn(rt.handle(), api.clone(), prefs, repaint.clone());
         let (ptt_tx, ptt_rx) = std_mpsc::channel();
@@ -557,7 +558,7 @@ impl App {
             self.ui_stage(ui, &vs);
         });
         self.ui_banner(ui, &vs);
-        self.ui_volume_popup(ui);
+        self.ui_volume_popup(ui, &vs);
         if self.settings_open {
             self.ui_settings(ui, &vs);
         }
@@ -588,6 +589,8 @@ impl App {
             Ok("native") => crate::stream::Preset::Native,
             _ => crate::stream::Preset::P1080_30,
         };
+        // AMADEUS_STREAM_AUDIO=0 — без звука.
+        let audio = std::env::var("AMADEUS_STREAM_AUDIO").map(|v| v != "0").unwrap_or(self.settings.stream_audio);
         let tx = self.voice.sender();
         std::thread::spawn(move || {
             let list = capture_win::list_sources(64, 36);
@@ -598,7 +601,7 @@ impl App {
             };
             match found {
                 Some(s) => {
-                    let _ = tx.send(Cmd::StartStream { source: s.id, title: s.title, width: s.width, height: s.height, preset });
+                    let _ = tx.send(Cmd::StartStream { source: s.id, title: s.title, width: s.width, height: s.height, preset, audio });
                 }
                 None => log::warn!("AMADEUS_AUTOSTREAM: источник «{want}» не найден"),
             }
@@ -607,7 +610,7 @@ impl App {
                 std::thread::sleep(Duration::from_secs(15));
                 let list = capture_win::list_sources(64, 36);
                 if let Some(s) = list.into_iter().find(|s| s.title.to_lowercase().contains(&next.to_lowercase())) {
-                    let _ = tx.send(Cmd::StartStream { source: s.id, title: s.title, width: s.width, height: s.height, preset });
+                    let _ = tx.send(Cmd::StartStream { source: s.id, title: s.title, width: s.width, height: s.height, preset, audio });
                 }
             }
         });
@@ -616,7 +619,8 @@ impl App {
     fn open_picker(&mut self, vs: &VoiceState) {
         let current = vs.stream.as_ref().map(|s| s.source);
         let preset = vs.stream.as_ref().map(|s| s.preset).unwrap_or(self.settings.stream_preset);
-        self.picker = Some(Picker::open(&self.ctx, preset, current));
+        let audio = vs.stream.as_ref().map(|s| s.audio != voice::AudioStatus::Off).unwrap_or(self.settings.stream_audio);
+        self.picker = Some(Picker::open(&self.ctx, preset, audio, current));
     }
 
     fn ui_picker(&mut self, ui: &mut Ui, vs: &VoiceState) {
@@ -628,10 +632,11 @@ impl App {
         match p.ui(ui.ctx()) {
             picker::Action::None => {}
             picker::Action::Cancel => self.picker = None,
-            picker::Action::Start { source, title, width, height, preset } => {
+            picker::Action::Start { source, title, width, height, preset, audio } => {
                 self.settings.stream_preset = preset;
+                self.settings.stream_audio = audio;
                 self.settings.save();
-                self.voice.send(Cmd::StartStream { source, title, width, height, preset });
+                self.voice.send(Cmd::StartStream { source, title, width, height, preset, audio });
                 self.picker = None;
             }
         }
@@ -950,12 +955,15 @@ impl App {
         let _ = screen;
     }
 
-    fn ui_volume_popup(&mut self, ui: &mut Ui) {
+    fn ui_volume_popup(&mut self, ui: &mut Ui, vs: &VoiceState) {
         let Some(pop) = &self.popup else { return };
         let (identity, name, pos, opened) = (pop.identity.clone(), pop.name.clone(), pop.pos, pop.opened_at);
         let mut vol = self.settings.volume_of(&identity);
         let mut muted = self.settings.is_user_muted(&identity);
         let mut changed = false;
+        let streaming = vs.peers.iter().any(|p| p.identity == identity && p.streaming);
+        let mut svol = self.settings.stream_volume_of(&identity);
+        let mut s_changed = false;
         let area = egui::Area::new(Id::new("vol-popup")).order(egui::Order::Foreground).fixed_pos(pos + vec2(8.0, 8.0)).show(ui.ctx(), |ui| {
             Frame::new()
                 .fill(t::BAKELITE_2)
@@ -989,6 +997,19 @@ impl App {
                             changed = true;
                         }
                     }
+                    // Звук трансляции — отдельно от голоса (как в Discord).
+                    if streaming {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{}  Звук трансляции", ph::MONITOR_PLAY)).size(13.0).color(t::DUST));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(format!("{:.0}%", svol * 100.0)).size(13.0));
+                            });
+                        });
+                        if t::slider(ui, &mut svol, 0.0..=2.0, 250.0).changed() {
+                            s_changed = true;
+                        }
+                    }
                 });
         });
         if changed {
@@ -1000,6 +1021,14 @@ impl App {
             self.settings.user_muted.insert(identity.clone(), muted);
             self.settings.save();
             self.voice.send(Cmd::SetUserVolume(identity.clone(), self.settings.effective_volume(&identity)));
+        }
+        if s_changed {
+            if (svol - 1.0).abs() < 0.04 {
+                svol = 1.0;
+            }
+            self.settings.stream_volume.insert(identity.clone(), svol);
+            self.settings.save();
+            self.voice.send(Cmd::SetStreamVolume(identity.clone(), svol));
         }
         let clicked_outside = ui.input(|i| i.pointer.any_pressed())
             && !area.response.contains_pointer()
@@ -1413,6 +1442,15 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
                 // Чем кодируется — видно сразу, без наведения.
                 let (tag, color) = if s.backend.contains("видеокарта") { ("видеокарта", t::NIXIE) } else { ("процессор", t::DUST) };
                 ui.label(RichText::new(tag).size(12.0).color(color));
+                match &s.audio {
+                    voice::AudioStatus::On(_) => {
+                        ui.label(RichText::new(egui_phosphor::regular::SPEAKER_HIGH).font(t::font(14.0)).color(t::NIXIE));
+                    }
+                    voice::AudioStatus::Failed(_) => {
+                        ui.label(RichText::new(egui_phosphor::regular::SPEAKER_X).font(t::font(14.0)).color(t::ERR_TEXT));
+                    }
+                    voice::AudioStatus::Off => {}
+                }
                 ui.label(RichText::new(&title).font(t::semibold(13.0)).color(t::FILAMENT));
                 ui.label(RichText::new(egui_phosphor::fill::MONITOR_ARROW_UP).font(t::icon_fill(15.0)).color(t::NIXIE));
             });
@@ -1422,9 +1460,15 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
     let enc = s.backend.clone();
     let lim = s.limitation.as_deref().map(|l| format!("
 Ограничение качества: {l}")).unwrap_or_default();
+    let audio = match &s.audio {
+        voice::AudioStatus::Off => "выключен".to_string(),
+        voice::AudioStatus::On(what) => what.to_string(),
+        voice::AudioStatus::Failed(e) => format!("не захватывается — {e}"),
+    };
     resp.on_hover_text(format!("В эфире: {}
 Качество: {} · отправляется {size}
-Энкодер: {enc}{lim}", s.title, s.preset.label()));
+Энкодер: {enc}{lim}
+Звук: {audio}", s.title, s.preset.label()));
 }
 
 fn ping_box(ui: &mut Ui, rtt: f64) {
