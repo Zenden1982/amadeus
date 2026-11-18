@@ -188,3 +188,119 @@ async fn server_limit_per_owner() {
     let (s, _) = t.call(Method::POST, "/servers", Some(&tok), Some(json!({"name": "лишний"}))).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+// ------------------------------------------------------------------ приглашения (задача 6)
+
+async fn server_invite(t: &T, tok: &str, server: i64, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    t.call(Method::POST, &format!("/servers/{server}/invites"), Some(tok), Some(body)).await
+}
+
+async fn new_invite(t: &T, tok: &str, server: i64, uses: u32) -> proto::Invite {
+    let (s, v) = server_invite(t, tok, server, json!({"uses": uses})).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    serde_json::from_value(v).unwrap()
+}
+
+async fn invites_of(t: &T, tok: &str, server: i64) -> Vec<proto::Invite> {
+    let (s, v) = t.call(Method::GET, &format!("/servers/{server}/invites"), Some(tok), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    serde_json::from_value(v).unwrap()
+}
+
+#[tokio::test]
+async fn register_by_server_invite_joins_that_server() {
+    let t = setup().await;
+    let (owner, _) = t.user("okabe").await;
+    let srv = t.create_server(&owner, "Лаб").await;
+    let inv = new_invite(&t, &owner, srv.id, 1).await;
+    assert_eq!(inv.server_id, srv.id);
+    let (s, v) = t.register(&inv.code, "mayuri").await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let tok = serde_json::from_value::<proto::AuthResponse>(v).unwrap().token;
+    let list = servers_of(&t, &tok).await;
+    assert_eq!(list.iter().map(|s| s.id).collect::<Vec<_>>(), vec![srv.id]);
+    let mine = &list[0];
+    assert_eq!(mine.roles.iter().find(|r| r.id == mine.my_role_id).unwrap().position, 0);
+}
+
+#[tokio::test]
+async fn existing_user_joins_by_code() {
+    let t = setup().await;
+    let (owner, _) = t.user("okabe").await;
+    let (guest, _) = t.user("suzuha").await;
+    let srv = t.create_server(&owner, "Лаб").await;
+    let inv = new_invite(&t, &owner, srv.id, 2).await;
+    let (s, v) = t.call(Method::POST, &format!("/invites/{}/join", inv.code.to_lowercase()), Some(&guest), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(serde_json::from_value::<Server>(v).unwrap().id, srv.id);
+    assert_eq!(servers_of(&t, &guest).await.len(), 1);
+    // второй раз — без списания
+    let (s, _) = t.call(Method::POST, &format!("/invites/{}/join", inv.code), Some(&guest), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(invites_of(&t, &owner, srv.id).await[0].uses_left, 1);
+    let (s, v) = t.call(Method::POST, "/invites/NOPE-NOPE-NOPE/join", Some(&guest), None).await;
+    assert_eq!((s, err(&v)), (StatusCode::BAD_REQUEST, "invalid_invite".to_string()));
+}
+
+#[tokio::test]
+async fn banned_cannot_join_by_new_invite() {
+    let t = setup().await;
+    let (owner, oid) = t.user("okabe").await;
+    let (guest, gid) = t.user("suzuha").await;
+    let srv = t.create_server(&owner, "Лаб").await;
+    sqlx::query("INSERT INTO server_bans (server_id, user_id, by_user, created_at) VALUES (?, ?, ?, 0)")
+        .bind(srv.id).bind(gid).bind(oid).execute(&t.pool).await.unwrap();
+    let inv = new_invite(&t, &owner, srv.id, 5).await;
+    let (s, v) = t.call(Method::POST, &format!("/invites/{}/join", inv.code), Some(&guest), None).await;
+    assert_eq!((s, err(&v)), (StatusCode::FORBIDDEN, "banned".to_string()));
+    assert_eq!(invites_of(&t, &owner, srv.id).await[0].uses_left, 5, "попытка не списала использование");
+}
+
+#[tokio::test]
+async fn any_member_can_invite_and_sees_own() {
+    let t = setup().await;
+    let (owner, _) = t.user("okabe").await;
+    let (member, mid) = t.user("daru").await;
+    let (stranger, _) = t.user("suzuha").await;
+    let srv = t.create_server(&owner, "Лаб").await;
+    t.add_member(srv.id, mid, 0).await;
+    let mine = new_invite(&t, &member, srv.id, 1).await;
+    let owners = new_invite(&t, &owner, srv.id, 1).await;
+    assert_eq!(invites_of(&t, &member, srv.id).await, vec![mine.clone()]);
+    assert_eq!(invites_of(&t, &owner, srv.id).await.len(), 2);
+    let (s, _) = server_invite(&t, &stranger, srv.id, json!({})).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // отозвать: своё — да, чужое — нет, владелец — любое
+    let (s, _) = t.call(Method::DELETE, &format!("/invites/{}", owners.code), Some(&member), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = t.call(Method::DELETE, &format!("/invites/{}", mine.code), Some(&member), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = t.call(Method::DELETE, &format!("/invites/{}", owners.code), Some(&owner), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(invites_of(&t, &owner, srv.id).await.iter().all(|i| i.revoked));
+}
+
+#[tokio::test]
+async fn invite_preview_public() {
+    let t = setup().await;
+    let (owner, _) = t.user("okabe").await;
+    let srv = t.create_server(&owner, "Лаборатория").await;
+    let inv = new_invite(&t, &owner, srv.id, 1).await;
+    let (s, v) = t.call(Method::GET, &format!("/invites/{}", inv.code), None, None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(serde_json::from_value::<proto::InvitePreview>(v).unwrap().server_name, "Лаборатория");
+    let (s, _) = t.call(Method::GET, "/invites/NOPE-NOPE-NOPE", None, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn legacy_post_invites_targets_server_1() {
+    let t = setup().await;
+    let admin = t.admin().await;
+    let inv = t.invite(&admin, json!({})).await;
+    assert_eq!(inv.server_id, 1);
+    let (s, v) = t.register(&inv.code, "mayuri").await;
+    assert_eq!(s, StatusCode::CREATED);
+    let tok = serde_json::from_value::<proto::AuthResponse>(v).unwrap().token;
+    assert_eq!(servers_of(&t, &tok).await[0].id, 1);
+}

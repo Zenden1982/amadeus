@@ -10,6 +10,7 @@ pub mod chat;
 mod db;
 pub mod events;
 mod images;
+mod invites;
 mod servers;
 pub mod voice;
 mod extract;

@@ -285,16 +285,14 @@ async fn channels_admin_only() {
         )
         .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+    // фаза 9.1: приглашать может любой участник (видит только свои приглашения)
     let (s, _) = t
         .call(Method::POST, "/invites", Some(&user.token), Some(json!({})))
         .await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    assert_eq!(
-        t.call(Method::GET, "/invites", Some(&user.token), None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, v) = t.call(Method::GET, "/invites", Some(&user.token), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v.as_array().unwrap().len(), 1);
 
     let (s, v) = t
         .call(

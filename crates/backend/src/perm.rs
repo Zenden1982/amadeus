@@ -69,7 +69,6 @@ pub async fn channel_member(db: &SqlitePool, channel_id: i64, user_id: i64) -> A
     Ok((m, ch))
 }
 
-#[allow(dead_code)] // задача 6
 pub async fn is_banned(db: &SqlitePool, server_id: i64, user_id: i64) -> AppResult<bool> {
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_bans WHERE server_id = ? AND user_id = ?")
         .bind(server_id)

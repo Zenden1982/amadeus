@@ -193,12 +193,13 @@ pub(crate) struct InviteRow {
     expires_at: Option<i64>,
     revoked: bool,
     created_by: i64,
+    server_id: Option<i64>,
 }
 
 impl From<InviteRow> for Invite {
     fn from(r: InviteRow) -> Self {
         Invite {
-            server_id: 1,
+            server_id: r.server_id.unwrap_or(0),
             code: r.code,
             uses_left: u32::try_from(r.uses_left).unwrap_or(0),
             expires_at: r.expires_at,

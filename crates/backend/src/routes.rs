@@ -6,14 +6,14 @@ use axum::{
 };
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use proto::{
-    AuthResponse, Channel, ChannelKind, CreateChannelRequest, CreateInviteRequest, HealthResponse,
-    Invite, JoinResponse, LoginRequest, RegisterRequest, User, limits,
+    AuthResponse, Channel, ChannelKind, CreateChannelRequest, HealthResponse,
+    JoinResponse, LoginRequest, RegisterRequest, User, limits,
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat, events, images, releases, servers,
-    db::{self, ChannelRow, InviteRow},
+    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat, events, images, invites, releases, servers,
+    db::{self, ChannelRow},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
     now, perm, security,
@@ -33,8 +33,10 @@ pub fn router(state: AppState) -> Router {
         .route("/channels", get(list_channels).post(create_channel))
         .route("/channels/{id}", delete(delete_channel))
         .route("/channels/{id}/join", post(join_channel))
-        .route("/invites", get(list_invites).post(create_invite))
-        .route("/invites/{code}", delete(revoke_invite))
+        .route("/invites", get(invites::legacy_list).post(invites::legacy_create))
+        .route("/invites/{code}", get(invites::preview).delete(invites::revoke))
+        .route("/invites/{code}/join", post(invites::join))
+        .route("/servers/{id}/invites", get(invites::list).post(invites::create))
         .route(
             "/channels/{id}/messages",
             get(chat::list_messages).post(chat::send_message),
@@ -132,7 +134,8 @@ async fn register(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    tracing::info!(user_id = id, %name, "registered by invite");
+    tracing::info!(user_id = id, %name, server_id, "registered by invite");
+    invites::announce_join(&state, server_id, id).await?;
 
     let resp = new_session(
         &state,
@@ -322,50 +325,3 @@ async fn join_channel(
     }))
 }
 
-async fn list_invites(
-    State(state): State<AppState>,
-    user: AuthUser,
-) -> AppResult<Json<Vec<Invite>>> {
-    user.require_admin()?;
-    let rows: Vec<InviteRow> = sqlx::query_as(
-        "SELECT code, uses_left, expires_at, revoked, created_by FROM invites ORDER BY created_at DESC",
-    )
-    .fetch_all(&state.inner.db)
-    .await?;
-    Ok(Json(rows.into_iter().map(Invite::from).collect()))
-}
-
-async fn create_invite(
-    State(state): State<AppState>,
-    user: AuthUser,
-    ApiJson(req): ApiJson<CreateInviteRequest>,
-) -> AppResult<(StatusCode, Json<Invite>)> {
-    user.require_admin()?;
-    let inv = db::create_invite(
-        &state.inner.db,
-        1,
-        user.id,
-        req.uses.unwrap_or(1),
-        req.expires_in_hours.unwrap_or(168),
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(inv)))
-}
-
-async fn revoke_invite(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(code): Path<String>,
-) -> AppResult<StatusCode> {
-    user.require_admin()?;
-    let n = sqlx::query("UPDATE invites SET revoked = 1 WHERE code = ?")
-        .bind(security::normalize_invite_code(&code))
-        .execute(&state.inner.db)
-        .await?
-        .rows_affected();
-    if n == 0 {
-        Err(AppError::NotFound)
-    } else {
-        Ok(StatusCode::NO_CONTENT)
-    }
-}
