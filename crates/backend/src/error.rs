@@ -12,6 +12,10 @@ pub enum AppError {
     NotFound,
     BadCredentials,
     InvalidInvite,
+    /// Забанен на этом сервере.
+    Banned,
+    /// Голосовой канал заполнен (лимит).
+    ChannelFull,
     NameTaken,
     Validation(String),
     BadRequest(String),
@@ -61,6 +65,8 @@ impl IntoResponse for AppError {
                 "invalid_invite",
                 "инвайт-код недействителен, истёк или исчерпан".into(),
             ),
+            AppError::Banned => (StatusCode::FORBIDDEN, "banned", "вы забанены на этом сервере".into()),
+            AppError::ChannelFull => (StatusCode::CONFLICT, "channel_full", "канал заполнен".into()),
             AppError::NameTaken => (
                 StatusCode::CONFLICT,
                 "name_taken",

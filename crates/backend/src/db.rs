@@ -199,11 +199,19 @@ impl From<InviteRow> for Invite {
     }
 }
 
-#[derive(sqlx::FromRow)]
+/// Столбцы для `ChannelRow` (`WHERE id = ?`).
+pub(crate) const CHANNEL_SELECT_BY_ID: &str =
+    "SELECT id, name, kind, server_id, category_id, position, user_limit FROM channels WHERE id = ?";
+
+#[derive(sqlx::FromRow, Debug, Clone)]
 pub(crate) struct ChannelRow {
-    id: i64,
-    name: String,
-    kind: String,
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub server_id: Option<i64>,
+    pub category_id: Option<i64>,
+    pub position: i64,
+    pub user_limit: Option<i64>,
 }
 
 impl TryFrom<ChannelRow> for Channel {
@@ -213,10 +221,10 @@ impl TryFrom<ChannelRow> for Channel {
             AppError::Internal(anyhow::anyhow!("bad channel kind in db: {}", r.kind))
         })?;
         Ok(Channel {
-            server_id: 1,
-            category_id: None,
-            position: 0,
-            user_limit: None,
+            server_id: r.server_id.unwrap_or(0),
+            category_id: r.category_id,
+            position: r.position as i32,
+            user_limit: r.user_limit.map(|n| n as u32),
             id: r.id,
             name: r.name,
             kind,

@@ -180,7 +180,7 @@ async fn list_channels(
     State(state): State<AppState>,
     _user: AuthUser,
 ) -> AppResult<Json<Vec<Channel>>> {
-    let rows: Vec<ChannelRow> = sqlx::query_as("SELECT id, name, kind FROM channels ORDER BY id")
+    let rows: Vec<ChannelRow> = sqlx::query_as("SELECT id, name, kind, server_id, category_id, position, user_limit FROM channels ORDER BY id")
         .fetch_all(&state.inner.db)
         .await?;
     Ok(Json(
@@ -261,7 +261,7 @@ async fn join_channel(
     Path(id): Path<i64>,
 ) -> AppResult<Json<JoinResponse>> {
     let row: Option<ChannelRow> =
-        sqlx::query_as("SELECT id, name, kind FROM channels WHERE id = ?")
+        sqlx::query_as(db::CHANNEL_SELECT_BY_ID)
             .bind(id)
             .fetch_optional(&state.inner.db)
             .await?;

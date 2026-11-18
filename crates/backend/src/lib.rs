@@ -9,6 +9,7 @@ pub mod security;
 pub mod chat;
 mod db;
 mod extract;
+pub(crate) mod perm;
 mod releases;
 
 pub use extract::ClientAddr;
