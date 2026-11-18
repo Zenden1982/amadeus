@@ -119,11 +119,14 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         .context("открыть базу")?;
     std::fs::create_dir_all(&cfg.uploads_dir)
         .with_context(|| format!("создать папку вложений {}", cfg.uploads_dir.display()))?;
+    std::fs::create_dir_all(&cfg.releases_dir)
+        .with_context(|| format!("создать папку выпусков {}", cfg.releases_dir.display()))?;
     let state = AppState::new(
         pool,
         cfg.livekit.clone(),
         cfg.trusted_proxy_hops,
         cfg.uploads_dir.clone(),
+        cfg.releases_dir.clone(),
     );
     backend::chat::spawn_janitor(state.clone());
     let app = backend::router(state.clone());
@@ -132,6 +135,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         addr = %cfg.bind_addr,
         proxy_hops = cfg.trusted_proxy_hops,
         uploads = %cfg.uploads_dir.display(),
+        releases = %cfg.releases_dir.display(),
         proxy_protocol = cfg.proxy_protocol,
         "listening"
     );

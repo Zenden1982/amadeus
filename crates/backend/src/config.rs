@@ -15,6 +15,10 @@ pub struct Config {
     #[arg(long, env = "UPLOADS_DIR", default_value = "data/uploads")]
     pub uploads_dir: std::path::PathBuf,
 
+    /// Выпуски клиента: `latest.json` и файлы для `/download` (кладёт scripts/release.sh).
+    #[arg(long, env = "RELEASES_DIR", default_value = "data/releases")]
+    pub releases_dir: std::path::PathBuf,
+
     #[command(flatten)]
     pub livekit: LiveKitConfig,
 

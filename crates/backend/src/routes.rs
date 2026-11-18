@@ -9,10 +9,10 @@ use proto::{
     AuthResponse, Channel, ChannelKind, CreateChannelRequest, CreateInviteRequest, HealthResponse,
     Invite, JoinResponse, LoginRequest, RegisterRequest, User, limits,
 };
-use tower_http::trace::TraceLayer;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat,
+    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat, releases,
     db::{self, ChannelRow, InviteRow},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
@@ -20,8 +20,12 @@ use crate::{
 };
 
 pub fn router(state: AppState) -> Router {
+    let downloads = ServeDir::new(&state.inner.releases_dir).precompressed_gzip();
     Router::new()
         .route("/health", get(health))
+        .route("/version", get(releases::version))
+        .route("/get", get(releases::get_installer))
+        .nest_service("/download", downloads)
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))

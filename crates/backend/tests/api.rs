@@ -54,6 +54,7 @@ async fn setup_with_limit(limit: u32) -> T {
         1,
         RateLimiter::new(limit, Duration::from_secs(300)),
         uploads.clone(),
+        uploads.join("releases"),
     );
     T {
         app: backend::router(state.clone()),
@@ -1030,4 +1031,60 @@ async fn events_stream() {
     })
     .await;
     assert!(end.is_ok(), "поток не закрылся");
+}
+
+// ------------------------------------------------------------ выпуски клиента
+
+#[tokio::test]
+async fn releases_version_and_download() {
+    let t = setup().await;
+    // выпуска ещё нет
+    let (st, v) = t.call(Method::GET, "/version", None, None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    let (st, _, _, _) = t.call_raw(Method::GET, "/get", None, vec![]).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let dir = t.uploads.join("releases");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("amadeus-0.2.0.exe"), b"MZ-new-client").unwrap();
+    let info = json!({
+        "version": "0.2.0",
+        "notes": "Трей и автообновление",
+        "file": "amadeus-0.2.0.exe",
+        "sha256": "0".repeat(64),
+        "size": 13,
+        "installer": "amadeus-setup-0.2.0.exe"
+    });
+    std::fs::write(dir.join("latest.json"), info.to_string()).unwrap();
+
+    // без авторизации
+    let (st, _, headers, bytes) = t.call_raw(Method::GET, "/version", None, vec![]).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+    let got: proto::ReleaseInfo = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(got.version, "0.2.0");
+    assert_eq!(got.size, 13);
+
+    let (st, _, _, bytes) = t.call_raw(Method::GET, "/download/amadeus-0.2.0.exe", None, vec![]).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(bytes, b"MZ-new-client");
+
+    let (st, _, headers, _) = t.call_raw(Method::GET, "/get", None, vec![]).await;
+    assert_eq!(st, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(headers[header::LOCATION], "download/amadeus-setup-0.2.0.exe");
+
+    // наружу из папки не выйти
+    for bad in ["/download/../api.rs", "/download/..%2F..%2FCargo.toml", "/download/missing.exe"] {
+        let (st, _, _, _) = t.call_raw(Method::GET, bad, None, vec![]).await;
+        assert!(st == StatusCode::NOT_FOUND || st == StatusCode::BAD_REQUEST, "{bad}: {st}");
+    }
+
+    // испорченный latest.json — ошибка сервера, а не странный ответ
+    std::fs::write(
+        dir.join("latest.json"),
+        json!({"version": "0.2.0", "file": "../x", "sha256": "0".repeat(64), "size": 1}).to_string(),
+    )
+    .unwrap();
+    let (st, _) = t.call(Method::GET, "/version", None, None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
 }

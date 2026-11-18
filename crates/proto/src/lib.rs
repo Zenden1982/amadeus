@@ -35,6 +35,60 @@ pub struct HealthResponse {
     pub protocol: u32,
 }
 
+/// `GET /version` — последняя выпущенная версия клиента. Файлы отдаёт `GET /download/{file}` (без авторизации),
+/// `GET /get` ведёт на установщик.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    /// Версия `x.y.z`.
+    pub version: String,
+    /// Что нового (коротко, для окна обновления).
+    #[serde(default)]
+    pub notes: String,
+    /// Новый `amadeus.exe` для самообновления.
+    pub file: String,
+    /// SHA-256 файла `file` (hex, строчные).
+    pub sha256: String,
+    /// Размер `file`, байт.
+    pub size: u64,
+    /// Установщик для новых пользователей.
+    #[serde(default)]
+    pub installer: Option<String>,
+}
+
+impl ReleaseInfo {
+    /// Имена файлов безопасны, хэш похож на SHA-256, версия разбирается.
+    pub fn is_valid(&self) -> bool {
+        parse_version(&self.version).is_some()
+            && safe_file_name(&self.file)
+            && self.installer.as_deref().is_none_or(safe_file_name)
+            && self.sha256.len() == 64
+            && self.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+}
+
+/// Имя файла для `/download/{file}`: латиница, цифры, `.`, `-`, `_`; не начинается с точки.
+pub fn safe_file_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.starts_with('.')
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// `"1.2.3"` → (1, 2, 3). Суффиксы (`-beta`) не поддерживаются.
+pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
+    let mut it = s.trim().split('.').map(|p| p.parse::<u64>().ok());
+    let v = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(v)
+}
+
+/// `candidate` новее `current`? Неразборчивые версии — не новее.
+pub fn is_newer(candidate: &str, current: &str) -> bool {
+    match (parse_version(candidate), parse_version(current)) {
+        (Some(a), Some(b)) => a > b,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
     pub invite_code: String,
@@ -222,6 +276,38 @@ mod tests {
         .unwrap();
         assert!(matches!(e, ServerEvent::MessageCreated { message } if message.attachments.is_empty()));
         assert!(serde_json::from_str::<ServerEvent>(r#"{"type":"future_thing"}"#).is_err());
+    }
+
+    #[test]
+    fn versions() {
+        assert_eq!(parse_version("0.10.2"), Some((0, 10, 2)));
+        assert_eq!(parse_version("1.2"), None);
+        assert_eq!(parse_version("1.2.3.4"), None);
+        assert_eq!(parse_version("1.2.x"), None);
+        assert!(is_newer("0.10.0", "0.9.9"));
+        assert!(!is_newer("0.2.0", "0.2.0"));
+        assert!(!is_newer("garbage", "0.1.0"));
+    }
+
+    #[test]
+    fn release_validation() {
+        let mut r = ReleaseInfo {
+            version: "0.2.0".into(),
+            notes: String::new(),
+            file: "amadeus-0.2.0.exe".into(),
+            sha256: "a".repeat(64),
+            size: 1,
+            installer: Some("amadeus-setup-0.2.0.exe".into()),
+        };
+        assert!(r.is_valid());
+        r.file = "../x.exe".into();
+        assert!(!r.is_valid());
+        r.file = "x.exe".into();
+        r.sha256 = "A".repeat(64);
+        assert!(!r.is_valid());
+        assert!(!safe_file_name(".hidden"));
+        assert!(!safe_file_name("a/b"));
+        assert!(!safe_file_name("a\\b"));
     }
 
     #[test]

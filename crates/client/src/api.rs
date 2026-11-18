@@ -108,6 +108,20 @@ impl Api {
         Self { http: self.http.clone(), stream_http: self.stream_http.clone(), base: self.base.clone(), token }
     }
 
+    /// Адрес сервера без «/» на конце.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// Последняя выпущенная версия клиента; `None` — сервер ещё ничего не выпускал (404).
+    pub async fn latest_release(&self) -> ApiResult<Option<proto::ReleaseInfo>> {
+        let resp = self.request(Method::GET, "/version").send().await.map_err(ApiError::network)?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Self::decode(resp).await.map(Some)
+    }
+
     pub fn has_token(&self) -> bool {
         self.token.is_some()
     }

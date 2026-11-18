@@ -30,6 +30,7 @@ USER app
 WORKDIR /data
 ENV DATABASE_URL=sqlite:///data/app.db \
     UPLOADS_DIR=/data/uploads \
+    RELEASES_DIR=/data/releases \
     BIND_ADDR=0.0.0.0:8080 \
     RUST_LOG=info
 VOLUME /data

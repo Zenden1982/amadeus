@@ -9,6 +9,7 @@ pub mod security;
 pub mod chat;
 mod db;
 mod extract;
+mod releases;
 
 pub use extract::ClientAddr;
 mod routes;
@@ -52,6 +53,8 @@ pub struct Inner {
     pub upload_limiter: RateLimiter<i64>,
     /// Где лежат файлы вложений.
     pub uploads_dir: PathBuf,
+    /// Выпуски клиента (`latest.json` + файлы), см. `releases.rs`.
+    pub releases_dir: PathBuf,
     /// События для `GET /events` (рассылка всем подключённым).
     pub events: broadcast::Sender<ServerEvent>,
     /// true — сервис останавливается: потоки SSE закрываются (иначе graceful shutdown ждал бы их вечно).
@@ -64,6 +67,7 @@ impl AppState {
         livekit: LiveKitConfig,
         trusted_proxy_hops: usize,
         uploads_dir: PathBuf,
+        releases_dir: PathBuf,
     ) -> Self {
         Self::with_limiter(
             db,
@@ -71,6 +75,7 @@ impl AppState {
             trusted_proxy_hops,
             RateLimiter::new(AUTH_ATTEMPTS, AUTH_WINDOW),
             uploads_dir,
+            releases_dir,
         )
     }
 
@@ -80,6 +85,7 @@ impl AppState {
         trusted_proxy_hops: usize,
         auth_limiter: RateLimiter,
         uploads_dir: PathBuf,
+        releases_dir: PathBuf,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -90,6 +96,7 @@ impl AppState {
                 chat_limiter: RateLimiter::new(CHAT_MESSAGES, CHAT_WINDOW),
                 upload_limiter: RateLimiter::new(UPLOADS, UPLOADS_WINDOW),
                 uploads_dir,
+                releases_dir,
                 events: broadcast::channel(256).0,
                 shutdown: watch::channel(false).0,
             }),

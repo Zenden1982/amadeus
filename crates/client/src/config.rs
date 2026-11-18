@@ -42,6 +42,10 @@ pub struct Settings {
     pub stream_audio: bool,
     /// Громкость звука трансляций участников по identity (отдельно от голоса).
     pub stream_volume: HashMap<String, f32>,
+    /// «Закрыть» прячет окно в трей (выход — меню значка в трее).
+    pub close_to_tray: bool,
+    /// Запускать вместе с Windows (только у установленной программы).
+    pub autostart: bool,
 }
 
 impl Default for Settings {
@@ -63,6 +67,8 @@ impl Default for Settings {
             stream_preset: Preset::default(),
             stream_audio: true,
             stream_volume: HashMap::new(),
+            close_to_tray: true,
+            autostart: true,
         }
     }
 }

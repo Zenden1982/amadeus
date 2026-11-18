@@ -16,6 +16,9 @@ use proto::{AuthResponse, Channel, ChannelKind, Invite, User};
 use crate::api::{self, Api, ApiError, ApiResult};
 use crate::chat::Chat;
 use crate::config::Settings;
+use crate::desktop::{self, Window};
+use crate::tray::Tray;
+use crate::update::{self, Updater};
 use crate::mictest::{self, MicTest};
 use crate::picker::{self, Picker};
 use crate::ptt::{self, Ptt};
@@ -119,6 +122,19 @@ pub struct App {
     /// Текстовый чат.
     chat: Chat,
     view: View,
+    /// Окно (HWND) — прятать в трей и показывать.
+    window: Window,
+    /// Значок в трее; `None` — не создался, тогда «закрыть» закрывает.
+    tray: Option<Tray>,
+    updater: Updater,
+    /// Окно «Доступно обновление».
+    update_open: bool,
+    /// Выходим по-настоящему (меню трея, перезапуск после обновления): «закрыть» не прятать в трей.
+    quitting: bool,
+    /// Не удалось прописать автозапуск.
+    autostart_error: Option<String>,
+    /// Запуск из автозагрузки: до этого момента держать окно спрятанным (eframe показывает его после первого кадра).
+    hide_until: Option<Instant>,
 }
 
 impl App {
@@ -145,6 +161,14 @@ impl App {
         };
         let video = VideoHub::new(&ctx);
         let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let updater = Updater::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let window = Window::from_cc(cc);
+        desktop::mark_window(window);
+        let tray = Tray::new(window, ctx.clone());
+        if tray.is_none() {
+            desktop::show(window); // без трея окно не прячем (даже при запуске из автозагрузки)
+        }
+        let autostart_error = if desktop::is_installed() { desktop::set_autostart(settings.autostart).err() } else { None };
         let voice = voice::spawn(rt.handle(), api.clone(), prefs, video.clone(), repaint.clone());
         let (ptt_tx, ptt_rx) = std_mpsc::channel();
         let ptt = Ptt::start(settings.ptt_key, settings.ptt_enabled, voice.sender(), ptt_tx, repaint);
@@ -200,7 +224,20 @@ impl App {
             watch_pending: None,
             chat,
             view: View::Voice,
+            window,
+            tray,
+            updater,
+            update_open: false,
+            quitting: false,
+            autostart_error,
+            hide_until: None,
         };
+        if app.tray.is_some() && std::env::args().any(|a| a == desktop::ARG_TRAY) {
+            // eframe показывает окно после первого кадра; свёрнутое — покажется только в панели задач,
+            // а через пару кадров уйдёт в трей (на экране ничего не мелькнёт)
+            desktop::minimize_inactive(window);
+            app.hide_until = Some(Instant::now() + Duration::from_secs(3));
+        }
         if has_token {
             app.fetch_me();
         }
@@ -242,6 +279,7 @@ impl App {
     fn set_api(&mut self, api: Api) {
         self.api = api.clone();
         self.chat.set_api(api.clone());
+        self.updater.set_api(api.clone());
         self.view = View::Voice;
         self.voice.send(Cmd::SetApi(api));
     }
@@ -624,7 +662,7 @@ impl App {
         };
         match text_channel {
             Some(ch) => {
-                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some();
+                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open;
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::GLASS)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal);
                 });
@@ -1249,7 +1287,8 @@ impl App {
         if self.fullscreen && self.focus.is_none() {
             self.set_fullscreen(&ctx, false);
         }
-        let modal_open = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.view != View::Voice;
+        let modal_open =
+            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.view != View::Voice;
         let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 && !modal_open {
             if self.fullscreen {
@@ -1490,6 +1529,190 @@ impl App {
         self.mic_level.store(0, Ordering::Relaxed);
     }
 
+    // ------------------------------------------------------------ трей, выход, обновление
+
+    /// «Закрыть» (лампа, Alt+F4) — спрятать в трей; «Выйти» из трея и готовое обновление — выйти по-настоящему.
+    fn handle_close(&mut self, ctx: &egui::Context) {
+        if self.tray.as_ref().is_some_and(|t| t.quit_requested()) && !self.quitting {
+            self.quit(ctx);
+        }
+        if self.updater.ready && !self.quitting {
+            match self.updater.restart() {
+                Ok(()) => self.quit(ctx),
+                Err(e) => {
+                    self.updater.ready = false;
+                    self.updater.error = Some(e);
+                }
+            }
+        }
+        let close = ctx.input(|i| i.viewport().close_requested());
+        if close && !self.quitting && self.settings.close_to_tray && self.tray.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.fullscreen {
+                self.set_fullscreen(ctx, false);
+            }
+            desktop::hide(self.window);
+            log::info!("окно спрятано в трей");
+        }
+    }
+
+    /// Отладка (только debug): AMADEUS_AUTO_UPDATE=1 — сразу ставить найденное обновление (кроме копии, только что
+    /// перезапущенной после обновления); AMADEUS_TRAY_QUIT_IN=<с> — «Выйти» из трея через N секунд (из другого потока).
+    #[cfg(debug_assertions)]
+    fn debug_update_hooks(&mut self) {
+        let after_update = std::env::args().any(|a| a == desktop::ARG_AFTER_UPDATE);
+        if std::env::var_os("AMADEUS_AUTO_UPDATE").is_some() && !after_update && self.updater.available.is_some() && !self.update_open {
+            log::info!("отладка: ставлю обновление");
+            self.update_open = true;
+            self.updater.install();
+        }
+        static ARMED: std::sync::Once = std::sync::Once::new();
+        if let (Some(secs), Some(tray)) = (std::env::var("AMADEUS_TRAY_QUIT_IN").ok().and_then(|s| s.parse::<u64>().ok()), &self.tray) {
+            ARMED.call_once(|| tray.debug_quit_in(Duration::from_secs(secs), self.ctx.clone()));
+        }
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        log::info!("выход");
+        self.quitting = true;
+        self.voice.send(Cmd::Leave);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Окно «Доступно обновление».
+    fn ui_update(&mut self, ui: &mut Ui) {
+        let Some(info) = self.updater.available.clone() else {
+            self.update_open = false;
+            return;
+        };
+        let in_call = self.voice.snapshot().channel.is_some();
+        let mut close = false;
+        let modal = egui::Modal::new(Id::new("update"))
+            .backdrop_color(Color32::from_rgba_unmultiplied(10, 8, 6, 185))
+            .frame(
+                Frame::new()
+                    .fill(t::BAKELITE)
+                    .stroke(Stroke::new(1.0, t::BRASS))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::symmetric(32, 28))
+                    .shadow(ui.visuals().window_shadow),
+            )
+            .show(ui.ctx(), |ui| {
+                ui.set_width(440.0);
+                ui.label(RichText::new(format!("Доступна версия {}", info.version)).font(t::xbold(20.0)));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("Сейчас у вас {} · загрузка {:.0} МБ", update::CURRENT, info.size as f64 / 1_048_576.0))
+                        .size(13.0)
+                        .color(t::DUST),
+                );
+                if !info.notes.trim().is_empty() {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(info.notes.trim()).color(t::PAPER));
+                }
+                if in_call {
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(format!("{}  Вы в голосовом канале — после перезапуска зайдите снова.", ph::INFO))
+                            .size(13.0)
+                            .color(t::DUST),
+                    );
+                }
+                if self.updater.installing {
+                    ui.add_space(14.0);
+                    ui.add(
+                        egui::ProgressBar::new(self.updater.progress())
+                            .fill(t::NIXIE)
+                            .desired_height(8.0)
+                            .corner_radius(CornerRadius::same(4)),
+                    );
+                    ui.label(RichText::new("Скачиваю…").size(13.0).color(t::DUST));
+                }
+                if let Some(err) = &self.updater.error {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(format!("{}  Не получилось: {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::ERR_TEXT));
+                    if ui.link("Скачать установщик в браузере").clicked() {
+                        desktop::open_url(&self.updater.installer_url());
+                    }
+                }
+                ui.add_space(20.0);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    let busy = self.updater.installing || self.updater.ready;
+                    if t::primary_button(ui, "Обновить и перезапустить", 230.0, !busy).clicked() {
+                        self.updater.install();
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new("Позже")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close || (modal.should_close() && !self.updater.installing) {
+            self.update_open = false;
+        }
+    }
+
+    /// Раздел настроек «Приложение»: автозапуск, трей, версия и обновления.
+    fn ui_settings_app(&mut self, ui: &mut Ui, w: f32) {
+        ui.add_space(18.0);
+        ui.label(RichText::new("Приложение").font(t::bold(15.0)));
+        ui.add_space(4.0);
+        let installed = desktop::is_installed();
+        let mut autostart = self.settings.autostart;
+        toggle_row(ui, w, |ui| {
+            let r = ui.add_enabled(installed, egui::Label::new("Запускать вместе с Windows (свёрнутым в трей)"));
+            if !installed {
+                r.on_disabled_hover_text("Только у программы, поставленной установщиком");
+            }
+        }, |ui| {
+            ui.add_enabled_ui(installed, |ui| {
+                if t::switch(ui, &mut autostart).changed() {
+                    self.settings.autostart = autostart;
+                    self.settings.save();
+                    self.autostart_error = desktop::set_autostart(autostart).err();
+                }
+            });
+        });
+        if let Some(e) = &self.autostart_error {
+            ui.label(RichText::new(format!("Автозапуск: {e}")).size(12.5).color(t::ERR_TEXT));
+        }
+        let mut to_tray = self.settings.close_to_tray;
+        toggle_row(ui, w, |ui| {
+            ui.label("«Закрыть» сворачивает в трей (выйти — через значок в трее)");
+        }, |ui| {
+            if t::switch(ui, &mut to_tray).changed() {
+                self.settings.close_to_tray = to_tray;
+                self.settings.save();
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Версия {}", update::CURRENT)).color(t::PAPER));
+            let u = &self.updater;
+            let status = if u.checking {
+                RichText::new("проверяю…").color(t::DUST)
+            } else if let Some(i) = &u.available {
+                RichText::new(format!("доступна {}", i.version)).color(t::NIXIE)
+            } else if let Some(e) = &u.error {
+                RichText::new(e.clone()).color(t::ERR_TEXT)
+            } else if u.checked_once {
+                RichText::new("последняя").color(t::DUST)
+            } else {
+                RichText::new("")
+            };
+            ui.label(status.size(13.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if self.updater.available.is_some() {
+                    if ui.button(format!("{} Обновить", ph::ARROW_CIRCLE_UP)).clicked() {
+                        self.update_open = true;
+                        self.settings_open = false;
+                    }
+                } else if ui.add_enabled(!self.updater.checking, egui::Button::new("Проверить обновления")).clicked() {
+                    self.updater.check();
+                }
+            });
+        });
+    }
+
     fn open_settings(&mut self) {
         self.settings_open = true;
         self.invite = None;
@@ -1620,6 +1843,8 @@ impl App {
                         }
                     });
 
+                    self.ui_settings_app(ui, w);
+
                     // аккаунт
                     ui.add_space(18.0);
                     ui.label(RichText::new("Аккаунт").font(t::bold(15.0)));
@@ -1681,6 +1906,25 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Вызывается и когда окно спрятано/свёрнуто (тогда `ui` не вызывается): трей, выход, обновления.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.updater.poll();
+        #[cfg(debug_assertions)]
+        self.debug_update_hooks();
+        self.handle_close(ctx);
+        if let Some(until) = self.hide_until {
+            if desktop::is_visible(self.window) {
+                desktop::hide(self.window);
+                log::info!("запуск из автозагрузки — окно в трее");
+            }
+            if Instant::now() < until {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            } else {
+                self.hide_until = None;
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_msgs();
         self.chat.poll();
@@ -1689,12 +1933,18 @@ impl eframe::App for App {
         }
         // В полноэкранном просмотре трансляции рамки нет.
         if !self.fullscreen {
-            crate::frame::title_bar(ui);
+            let badge = self.updater.available.as_ref().map(|i| format!("Обновление {}", i.version));
+            if crate::frame::title_bar(ui, badge.as_deref()) {
+                self.update_open = true;
+            }
         }
         match self.screen {
             Screen::Boot => self.ui_boot(ui),
             Screen::Login => self.ui_login(ui),
             Screen::Main => self.ui_main(ui),
+        }
+        if self.update_open {
+            self.ui_update(ui);
         }
         if !self.fullscreen {
             crate::frame::resize_edges(ui.ctx());

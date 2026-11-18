@@ -114,7 +114,9 @@ enum Btn {
 /// Полоса заголовка — первой панелью кадра (на всю ширину окна). В полноэкранном режиме не показывать.
 /// Вид «индикаторные лампы»: «AMADEUS» газоразрядным шрифтом, кнопки — три лампы в латунных ободках,
 /// при наведении загораются (янтарь; «закрыть» — красная).
-pub fn title_bar(ui: &mut Ui) {
+/// `badge` — надпись-кнопка слева от ламп (есть обновление); возвращает true, если по ней кликнули.
+pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
+    let mut badge_clicked = false;
     egui::Panel::top("titlebar")
         .exact_size(HEIGHT)
         .resizable(false)
@@ -129,7 +131,29 @@ pub fn title_bar(ui: &mut Ui) {
             let maxb = close.translate(vec2(-BTN_W, 0.0));
             let minb = maxb.translate(vec2(-BTN_W, 0.0));
 
-            let drag_rect = Rect::from_min_max(r.min, pos2(minb.left(), r.bottom()));
+            // надпись «есть обновление»: латунная рамка, янтарный текст, при наведении светится
+            let mut drag_right = minb.left();
+            if let Some(text) = badge {
+                let galley = ui.painter().layout_no_wrap(
+                    format!("{}  {text}", egui_phosphor::regular::ARROW_CIRCLE_UP),
+                    t::bold(12.5),
+                    t::NIXIE,
+                );
+                let size = vec2(galley.size().x + 20.0, 22.0);
+                let rect = Rect::from_min_size(pos2(minb.left() - 12.0 - size.x, r.center().y - size.y / 2.0), size);
+                let resp = ui.interact(rect, Id::new("titlebar-badge"), Sense::click());
+                let lit = ctx.animate_bool_with_time(Id::new("titlebar-badge-lit"), resp.hovered(), 0.12);
+                let p = ui.painter();
+                p.rect_filled(rect.expand(3.0 * lit), CornerRadius::same(13), t::NIXIE.gamma_multiply(0.10 * lit));
+                p.rect(rect, CornerRadius::same(11), t::NIXIE.gamma_multiply(0.08 + 0.10 * lit), Stroke::new(1.0, t::BRASS), egui::StrokeKind::Inside);
+                p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::NIXIE);
+                if resp.on_hover_text("Скачать и перезапустить").clicked() {
+                    badge_clicked = true;
+                }
+                drag_right = rect.left() - 4.0;
+            }
+
+            let drag_rect = Rect::from_min_max(r.min, pos2(drag_right, r.bottom()));
             let drag = ui.interact(drag_rect, Id::new("titlebar-drag"), Sense::click_and_drag());
             if edge_dir(&ctx).is_none() {
                 if drag.double_clicked() {
@@ -174,6 +198,7 @@ pub fn title_bar(ui: &mut Ui) {
                 }
             }
         });
+    badge_clicked
 }
 
 /// Отладка вёрстки (только debug): AMADEUS_FRAME_HOVER=min|max|close — лампа горит, как при наведении.
