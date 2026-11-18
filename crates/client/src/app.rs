@@ -448,7 +448,7 @@ impl App {
         egui::CentralPanel::no_frame().frame(Frame::new().fill(t::GLASS)).show(ui, |ui| {
             let r = ui.max_rect();
             let p = ui.painter();
-            t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 40.0), vec2(96.0, 96.0)), true);
+            t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 40.0), vec2(96.0, 96.0)), true, true);
             match &self.boot_error {
                 None => {
                     p.text(r.center() + vec2(0.0, 40.0), Align2::CENTER_CENTER, "Подключаемся к серверу…", t::font(15.0), t::DUST);
@@ -822,7 +822,7 @@ impl App {
                     .show_separator_line(false)
                     .frame(Frame::new().inner_margin(Margin { left: 18, right: 18, top: 16, bottom: 12 }))
                     .show(ui, |ui| {
-                        t::wordmark(ui, 30.0, 18.0);
+                        t::wordmark_text(ui, 18.0);
                         let r = ui.max_rect();
                         ui.painter().hline(full.x_range(), r.bottom() + 12.0, Stroke::new(1.0, t::BRASS_DIM));
                     });
@@ -1045,7 +1045,7 @@ impl App {
             }
             (_, None) => {
                 let p = ui.painter();
-                t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 50.0), vec2(110.0, 110.0)), true);
+                t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 50.0), vec2(110.0, 110.0)), true, true);
                 p.text(r.center() + vec2(0.0, 30.0), Align2::CENTER_TOP, "Выберите голосовой канал слева", t::semibold(16.0), t::DUST);
             }
             (Conn::Connecting, Some(_)) if vs.peers.is_empty() => {

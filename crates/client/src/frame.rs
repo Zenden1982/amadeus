@@ -3,7 +3,7 @@
 //! двойной клик — развернуть, ресайз за края (`BeginResize`). Тень и скруглённые углы Win11 — через DWM.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, CursorIcon, Id, PointerButton, Pos2, Rect, ResizeDirection, Sense, Stroke, Ui,
+    self, Color32, CornerRadius, CursorIcon, Id, PointerButton, Pos2, Rect, ResizeDirection, Sense, Stroke, Ui,
     ViewportCommand, pos2, vec2,
 };
 
@@ -112,7 +112,7 @@ enum Btn {
 }
 
 /// Полоса заголовка — первой панелью кадра (на всю ширину окна). В полноэкранном режиме не показывать.
-/// Вид «индикаторные лампы»: «AMADEUS» газоразрядным шрифтом, кнопки — три лампы в латунных ободках,
+/// Вид «индикаторные лампы»: слева значок-осциллограф, кнопки — три лампы в латунных ободках,
 /// при наведении загораются (янтарь; «закрыть» — красная).
 /// `badge` — надпись-кнопка слева от ламп (есть обновление); возвращает true, если по ней кликнули.
 pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
@@ -165,14 +165,9 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
 
             let p = ui.painter();
             p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, SEPARATOR));
-            let logo = Rect::from_center_size(pos2(r.left() + 22.0, r.center().y), vec2(20.0, 20.0));
-            t::logo(p, logo, false);
-            let name_pos = pos2(logo.right() + 8.0, r.center().y + 1.0);
-            if focused {
-                t::nixie_text(p, name_pos, Align2::LEFT_CENTER, "AMADEUS", 19.0);
-            } else {
-                p.text(name_pos, Align2::LEFT_CENTER, "AMADEUS", t::nixie(19.0), t::NIXIE.gamma_multiply(0.45));
-            }
+            // только значок (без надписи — «Amadeus» есть в углу сайдбара)
+            let logo = Rect::from_center_size(pos2(r.left() + 24.0, r.center().y), vec2(26.0, 26.0));
+            t::logo(p, logo, false, focused);
 
             let forced = forced_hover();
             for (rect, kind) in [(minb, Btn::Min), (maxb, Btn::Max), (close, Btn::Close)] {

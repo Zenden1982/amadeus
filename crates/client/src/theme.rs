@@ -10,7 +10,7 @@ pub const BAKELITE: Color32 = Color32::from_rgb(0x21, 0x1B, 0x16);
 pub const BAKELITE_2: Color32 = Color32::from_rgb(0x2A, 0x22, 0x1C);
 pub const BRASS: Color32 = Color32::from_rgb(0x4A, 0x3B, 0x2D);
 pub const BRASS_DIM: Color32 = Color32::from_rgb(0x2F, 0x26, 0x1E);
-pub const BRASS_LOGO: Color32 = Color32::from_rgb(0x5C, 0x4A, 0x36);
+pub const BRASS_LOGO: Color32 = Color32::from_rgb(0x5C, 0x4A, 0x36); // ободки ламп рамки
 pub const NIXIE: Color32 = Color32::from_rgb(0xFF, 0x9A, 0x3C);
 pub const FILAMENT: Color32 = Color32::from_rgb(0xFF, 0xD9, 0xA8);
 pub const PAPER: Color32 = Color32::from_rgb(0xEC, 0xE3, 0xD6);
@@ -204,40 +204,57 @@ pub fn nixie_text(painter: &egui::Painter, pos: Pos2, anchor: Align2, text: &str
     painter.text(pos, anchor, text, fid, NIXIE)
 }
 
-/// Логотип: колба (латунь) + нить «A» с волной голоса. Координаты как в design/logo.svg (64×64).
-pub fn logo(painter: &egui::Painter, rect: Rect, with_bulb: bool) {
+/// Логотип «Осциллограф»: «A» — всплеск на линии сигнала, перекладина — короткая волна. Координаты как в
+/// design/logo.svg (64×64). `tile` — плашка-экран с сеткой (крупные места); без неё — только линия (рамка окна).
+/// `lit` = false — приглушённый (неактивное окно).
+pub fn logo(painter: &egui::Painter, rect: Rect, tile: bool, lit: bool) {
     let s = rect.width() / 64.0;
     let p = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    if with_bulb {
-        let brass = Stroke::new(2.5 * s, BRASS_LOGO);
-        let mut arc = vec![p(15.0, 54.0), p(15.0, 24.0)];
-        for i in 0..=24 {
-            let a = std::f32::consts::PI * (1.0 + i as f32 / 24.0);
-            arc.push(p(32.0 + 17.0 * a.cos(), 24.0 + 17.0 * a.sin()));
+    if tile {
+        let r = Rect::from_min_max(p(2.0, 2.0), p(62.0, 62.0));
+        let round = CornerRadius::same((14.0 * s).round().min(255.0) as u8);
+        painter.rect_filled(r, round, GLASS);
+        // тёплое пятно в центре экрана (как радиальный градиент в svg)
+        painter.circle_filled(p(32.0, 36.0), 22.0 * s, Color32::from_rgba_unmultiplied(0x3A, 0x26, 0x14, 70));
+        painter.circle_filled(p(32.0, 36.0), 14.0 * s, Color32::from_rgba_unmultiplied(0x3A, 0x26, 0x14, 70));
+        let grid = Stroke::new((0.7 * s).max(1.0), Color32::from_rgb(0x2E, 0x24, 0x19));
+        for i in 0..5 {
+            let k = 14.0 + 10.0 * i as f32;
+            painter.hline((6.0 * s + rect.left())..=(58.0 * s + rect.left()), rect.top() + k * s, grid);
+            painter.vline(rect.left() + (k - 2.0) * s, (6.0 * s + rect.top())..=(58.0 * s + rect.top()), grid);
         }
-        arc.push(p(49.0, 54.0));
-        painter.add(Shape::line(arc, brass));
-        painter.line_segment([p(11.0, 54.0), p(53.0, 54.0)], brass);
+        painter.rect_stroke(r, round, Stroke::new((1.0 * s).max(1.0), BRASS), StrokeKind::Inside);
     }
-    let a_shape = vec![p(22.0, 48.0), p(32.0, 17.0), p(42.0, 48.0)];
-    let wave = vec![p(24.5, 38.0), p(28.0, 38.0), p(30.0, 34.0), p(32.5, 42.0), p(35.0, 36.0), p(36.5, 38.0), p(39.0, 38.0)];
-    for (w, a) in [(9.0, 22u8), (6.0, 40), (4.0, 70)] {
-        painter.add(Shape::line(a_shape.clone(), Stroke::new(w * s, nixie_a(a))));
-        painter.add(Shape::line(wave.clone(), Stroke::new(w * s, nixie_a(a))));
+    let trace = vec![p(7.0, 46.0), p(18.0, 46.0), p(32.0, 13.0), p(46.0, 46.0), p(57.0, 46.0)];
+    let wave = vec![p(25.5, 34.0), p(29.5, 34.0), p(31.0, 31.0), p(33.0, 37.0), p(34.5, 34.0), p(37.5, 34.0)];
+    let core = (3.2 * s).max(1.7);
+    if lit {
+        for (k, a) in [(3.0, 22u8), (2.0, 40), (1.4, 70)] {
+            painter.add(Shape::line(trace.clone(), Stroke::new(core * k, nixie_a(a))));
+            painter.add(Shape::line(wave.clone(), Stroke::new(core * k, nixie_a(a))));
+        }
     }
-    painter.add(Shape::line(a_shape, Stroke::new(2.6 * s, NIXIE)));
-    painter.add(Shape::line(wave, Stroke::new(2.6 * s, NIXIE)));
-    painter.circle_filled(p(32.0, 17.0), 1.2 * s, FILAMENT);
+    let color = if lit { NIXIE } else { NIXIE.gamma_multiply(0.45) };
+    painter.add(Shape::line(trace, Stroke::new(core, color)));
+    painter.add(Shape::line(wave, Stroke::new(core, color)));
+    if lit && tile {
+        painter.circle_filled(p(32.0, 13.0), 1.2 * s, FILAMENT);
+    }
 }
 
 /// Логотип + «Amadeus».
 pub fn wordmark(ui: &mut Ui, logo_size: f32, text_size: f32) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(logo_size), Sense::hover());
-        logo(ui.painter(), rect, true);
+        logo(ui.painter(), rect, true, true);
         ui.add_space(2.0);
         ui.label(egui::RichText::new("Amadeus").font(xbold(text_size)).color(PAPER));
     });
+}
+
+/// Только надпись «Amadeus» (угол сайдбара: значок уже есть в рамке окна).
+pub fn wordmark_text(ui: &mut Ui, text_size: f32) {
+    ui.label(egui::RichText::new("Amadeus").font(xbold(text_size)).color(PAPER));
 }
 
 /// Переключатель как в макете (янтарь = вкл).
