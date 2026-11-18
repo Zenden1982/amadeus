@@ -20,6 +20,7 @@ use crate::desktop::{self, Window};
 use crate::tray::Tray;
 use crate::update::{self, Updater};
 use crate::mictest::{self, MicTest};
+use crate::people::{self, People};
 use crate::picker::{self, Picker};
 use crate::ptt::{self, Ptt};
 use crate::theme::{self as t, DockStyle};
@@ -36,6 +37,8 @@ enum Msg {
     Auth(ApiResult<AuthResponse>),
     Channels(ApiResult<Vec<Channel>>),
     Invite(ApiResult<Invite>),
+    /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
+    Profile(Result<Option<User>, String>),
 }
 
 #[derive(PartialEq)]
@@ -124,6 +127,12 @@ pub struct App {
     watch_pending: Option<(String, Instant)>,
     /// Текстовый чат.
     chat: Chat,
+    /// Имена и аватары.
+    people: People,
+    /// Настройки → Профиль: поле имени, идёт сохранение, ошибка.
+    profile_name: String,
+    profile_busy: bool,
+    profile_error: Option<String>,
     view: View,
     /// Окно (HWND) — прятать в трей и показывать.
     window: Window,
@@ -164,6 +173,7 @@ impl App {
         };
         let video = VideoHub::new(&ctx);
         let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let people = People::new(rt.handle().clone(), ctx.clone(), api.clone());
         let updater = Updater::new(rt.handle().clone(), ctx.clone(), api.clone());
         let window = Window::from_cc(cc);
         desktop::mark_window(window);
@@ -228,6 +238,10 @@ impl App {
             views_frame: HashMap::new(),
             watch_pending: None,
             chat,
+            people,
+            profile_name: String::new(),
+            profile_busy: false,
+            profile_error: None,
             view: View::Voice,
             window,
             tray,
@@ -279,11 +293,19 @@ impl App {
         self.channels_at = Instant::now();
         let api = self.api.clone();
         self.spawn(async move { api.channels().await }, Msg::Channels);
+        self.people.reload();
+    }
+
+    fn set_me(&mut self, user: User) {
+        self.people.learn(people::public(&user));
+        self.profile_name = user.display_name.clone().unwrap_or_default();
+        self.me = Some(user);
     }
 
     fn set_api(&mut self, api: Api) {
         self.api = api.clone();
         self.chat.set_api(api.clone());
+        self.people.set_api(api.clone());
         self.updater.set_api(api.clone());
         self.view = View::Voice;
         self.voice.send(Cmd::SetApi(api));
@@ -293,7 +315,7 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Me(Ok(user)) => {
-                    self.me = Some(user);
+                    self.set_me(user);
                     self.screen = Screen::Main;
                     self.fetch_channels();
                 }
@@ -307,6 +329,17 @@ impl App {
                         self.boot_error = Some(e.message);
                     }
                 }
+                Msg::Profile(res) => {
+                    self.profile_busy = false;
+                    match res {
+                        Ok(Some(user)) => {
+                            self.profile_error = None;
+                            self.set_me(user);
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.profile_error = Some(e),
+                    }
+                }
                 Msg::Auth(res) => {
                     self.login.busy = false;
                     match res {
@@ -315,7 +348,7 @@ impl App {
                             self.settings.last_name = auth.user.name.clone();
                             self.settings.save();
                             self.set_api(self.api.with_token(Some(auth.token)));
-                            self.me = Some(auth.user);
+                            self.set_me(auth.user);
                             self.login.password.clear();
                             self.login.invite = Default::default();
                             self.login.error = None;
@@ -669,7 +702,7 @@ impl App {
             Some(ch) => {
                 let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open;
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::BG)).show(ui, |ui| {
-                    self.chat.ui(ui, &ch, modal);
+                    self.chat.ui(ui, &ch, modal, &self.people);
                 });
             }
             None => {
@@ -860,7 +893,7 @@ impl App {
             }
             if active {
                 for p in &vs.peers {
-                    member_row(ui, p);
+                    member_row(ui, p, &self.people);
                 }
             }
         }
@@ -878,11 +911,15 @@ impl App {
     }
 
     fn ui_me(&mut self, ui: &mut Ui, vs: &VoiceState) {
-        let name = self.me.as_ref().map(|u| u.name.clone()).unwrap_or_default();
+        let me = self.me.as_ref().map(people::public);
+        let name = me.as_ref().map(|u| u.shown_name().to_string()).unwrap_or_default();
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
             let glow = if vs.transmitting && vs.peers.first().is_some_and(|p| p.speaking) { 0.6 } else { 0.0 };
-            t::avatar(ui.painter(), rect.center(), 17.0, &name, glow, false);
+            match &me {
+                Some(u) => self.people.paint(ui.painter(), rect.center(), 17.0, u, glow, false),
+                None => t::avatar(ui.painter(), rect.center(), 17.0, &name, glow, false),
+            }
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(RichText::new(&name).font(t::semibold(14.0)));
@@ -1094,7 +1131,7 @@ impl App {
             Item::Person(p) => {
                 let resp = ui.interact(rect, Id::new(("tile", &p.identity)), Sense::click());
                 let glow = speak_glow(ui, p);
-                tile(ui, rect, p, glow);
+                tile(ui, rect, p, glow, &self.people);
                 if resp.clicked() && !p.is_local {
                     self.open_popup(p, resp.interact_pointer_pos().unwrap_or(rect.center()));
                 }
@@ -1157,10 +1194,10 @@ impl App {
             let ar = (rect.height() * 0.16).clamp(16.0, 34.0);
             let ac = rect.center() - vec2(0.0, ar + if small { 4.0 } else { 14.0 });
             if !tiny {
-                t::avatar(&painter, ac, ar, &p.name, 0.0, false);
+                self.people.paint(&painter, ac, ar, &peer_user(&self.people, p), 0.0, false);
             }
             if !small {
-                painter.text(ac + vec2(0.0, ar + 18.0), Align2::CENTER_CENTER, format!("{} транслирует экран", p.name), t::semibold(14.0), t::TEXT);
+                painter.text(ac + vec2(0.0, ar + 18.0), Align2::CENTER_CENTER, format!("{} транслирует экран", peer_name(&self.people, p)), t::semibold(14.0), t::TEXT);
             }
             let bw = if small { 116.0 } else { 150.0 };
             let by = if tiny { rect.center().y - 4.0 } else { ac.y + ar + if small { 22.0 } else { 52.0 } };
@@ -1178,7 +1215,7 @@ impl App {
         };
         painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
         live_badge(&painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
-        chip(&painter, rect.left_bottom() + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, p.name), t::TEXT);
+        chip(&painter, rect.left_bottom() + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, peer_name(&self.people, p)), t::TEXT);
 
         if p.is_local {
             return;
@@ -1818,6 +1855,87 @@ impl App {
         self.voice.send(Cmd::RefreshDevices);
     }
 
+/// Настройки → Профиль: аватар и отображаемое имя.
+    fn ui_settings_profile(&mut self, ui: &mut Ui, w: f32) {
+        let Some(me) = self.me.clone() else { return };
+        ui.label(RichText::new("Профиль").font(t::xbold(20.0)));
+        ui.add_space(12.0);
+        let busy = self.profile_busy;
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(72.0, 72.0), Sense::hover());
+            self.people.paint(ui.painter(), rect.center(), 36.0, &people::public(&me), 0.0, false);
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new(people::public(&me).shown_name()).font(t::bold(16.0)));
+                ui.label(RichText::new(format!("логин: {}", me.name)).size(13.0).color(t::TEXT_MUTED));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new(format!("{} Сменить аватар…", ph::IMAGE))).clicked() {
+                        self.pick_avatar();
+                    }
+                    if me.avatar.is_some() && ui.add_enabled(!busy, egui::Button::new("Убрать")).clicked() {
+                        self.profile_busy = true;
+                        self.profile_error = None;
+                        let api = self.api.clone();
+                        self.spawn(async move { api.delete_avatar().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+                    }
+                });
+            });
+        });
+        ui.add_space(12.0);
+        label(ui, "Отображаемое имя");
+        ui.horizontal(|ui| {
+            let r = ui.add_enabled(
+                !busy,
+                field(&mut self.profile_name, w - 130.0).hint_text(format!("пусто — показывать логин «{}»", me.name)).char_limit(proto::limits::DISPLAY_NAME_MAX),
+            );
+            let changed = self.profile_name.trim() != me.display_name.as_deref().unwrap_or("");
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add_enabled(!busy && changed, egui::Button::new("Сохранить")).clicked() || (enter && changed)) && !busy {
+                self.profile_busy = true;
+                self.profile_error = None;
+                let (api, name) = (self.api.clone(), self.profile_name.trim().to_string());
+                self.spawn(async move { api.update_me(&name).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+            }
+        });
+        if busy {
+            ui.label(RichText::new("Сохраняю…").size(13.0).color(t::TEXT_MUTED));
+        }
+        if let Some(e) = &self.profile_error {
+            ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(t::DANGER_TEXT));
+        }
+    }
+
+    /// Выбрать картинку → квадрат из середины, 256 px PNG → `PUT /me/avatar`.
+    fn pick_avatar(&mut self) {
+        self.profile_busy = true;
+        self.profile_error = None;
+        let api = self.api.clone();
+        self.spawn(
+            async move {
+                let picked = tokio::task::spawn_blocking(|| -> Result<Option<Vec<u8>>, String> {
+                    let Some(path) = rfd::FileDialog::new()
+                        .set_title("Аватар")
+                        .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                        .pick_file()
+                    else {
+                        return Ok(None);
+                    };
+                    let bytes = std::fs::read(&path).map_err(|e| format!("Не читается файл: {e}"))?;
+                    people::prepare_upload(&bytes).map(Some)
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                match picked {
+                    None => Ok(None),
+                    Some(png) => api.put_avatar(png).await.map(Some).map_err(|e| e.message),
+                }
+            },
+            Msg::Profile,
+        );
+    }
+
     fn ui_settings(&mut self, ui: &mut Ui, vs: &VoiceState) {
         self.sync_mic_test(vs);
         ui.ctx().request_repaint_after(Duration::from_millis(50)); // живой индикатор уровня
@@ -1836,6 +1954,8 @@ impl App {
                 ui.set_width(556.0);
                 let w = 556.0;
                 egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 140.0).show(ui, |ui| {
+                    self.ui_settings_profile(ui, w);
+                    ui.add_space(22.0);
                     ui.label(RichText::new("Голос и звук").font(t::xbold(20.0)));
                     ui.add_space(14.0);
                     if let Some(err) = &vs.audio_error {
@@ -2027,6 +2147,14 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_msgs();
         self.chat.poll();
+        for u in self.chat.take_users() {
+            if let Some(me) = self.me.as_mut().filter(|m| m.id == u.id) {
+                me.display_name = u.display_name.clone();
+                me.avatar = u.avatar.clone();
+            }
+            self.people.learn(u);
+        }
+        self.people.poll();
         if self.screen == Screen::Main && self.chat.unauthorized() {
             self.logout();
         }
@@ -2202,15 +2330,30 @@ fn channel_row(ui: &mut Ui, icon: &str, name: &str, active: bool, count: Option<
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
-fn member_row(ui: &mut Ui, p: &Peer) {
+/// Человек за участником голоса (identity = id пользователя); нет в кэше — имя из LiveKit.
+fn peer_user(people: &People, p: &Peer) -> proto::PublicUser {
+    people.by_identity(&p.identity).cloned().unwrap_or_else(|| proto::PublicUser {
+        id: 0,
+        name: p.name.clone(),
+        display_name: None,
+        avatar: None,
+    })
+}
+
+fn peer_name(people: &People, p: &Peer) -> String {
+    peer_user(people, p).shown_name().to_string()
+}
+
+fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
     let glow = speak_glow(ui, p);
     let painter = ui.painter();
     let c = pos2(rect.left() + 48.0 + 11.0, rect.center().y);
-    t::avatar(painter, c, 11.0, &p.name, glow * 0.7, false);
+    let u = peer_user(people, p);
+    people.paint(painter, c, 11.0, &u, glow * 0.7, false);
     let color = if glow > 0.05 { t::TEXT } else { t::TEXT_MUTED };
-    painter.text(pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, &p.name, t::font(13.5), color);
+    painter.text(pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, u.shown_name(), t::font(13.5), color);
     let mut x = rect.right() - 22.0;
     if p.mic_muted {
         painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::DANGER);
@@ -2227,7 +2370,8 @@ fn speak_glow(ui: &Ui, p: &Peer) -> f32 {
     ui.ctx().animate_value_with_time(Id::new(("glow", &p.identity)), target, 0.12)
 }
 
-fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32) {
+fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32, people: &People) {
+    let u = peer_user(people, p);
     let painter = ui.painter();
     let talk = glow > 0.05;
     painter.rect_filled(rect, CornerRadius::same(12), t::SURFACE);
@@ -2239,9 +2383,9 @@ fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32) {
     painter.rect_stroke(rect, CornerRadius::same(12), stroke, StrokeKind::Inside);
     let r = (rect.height().min(rect.width()) * 0.22).clamp(24.0, 46.0);
     let ac = rect.center() - vec2(0.0, r * 0.35);
-    t::avatar(painter, ac, r, &p.name, glow, p.mic_muted && !p.is_local);
+    people.paint(painter, ac, r, &u, glow, p.mic_muted && !p.is_local);
     let name_pos = pos2(rect.center().x, ac.y + r + 18.0);
-    let galley = painter.layout_no_wrap(p.name.clone(), t::bold(15.0), t::TEXT);
+    let galley = painter.layout_no_wrap(u.shown_name().to_string(), t::bold(15.0), t::TEXT);
     let icon_w = if p.mic_muted { 24.0 } else { 0.0 };
     let start = name_pos.x - (galley.size().x + icon_w) / 2.0;
     painter.galley(pos2(start, name_pos.y - galley.size().y / 2.0), galley.clone(), t::TEXT);

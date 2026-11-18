@@ -203,10 +203,7 @@ pub fn radial_glow(painter: &egui::Painter, center: Pos2, radius: f32, color: Co
 
 /// Круглый аватар с буквой. `glow` 0..1 — янтарное кольцо говорящего.
 pub fn avatar(painter: &egui::Painter, center: Pos2, r: f32, name: &str, glow: f32, dim: bool) {
-    if glow > 0.01 {
-        radial_glow(painter, center, r + 6.0 + 22.0 * glow, accent_a((150.0 * glow) as u8));
-        painter.circle_stroke(center, r + 4.0, Stroke::new(2.5, ACCENT.gamma_multiply(0.5 + 0.5 * glow)));
-    }
+    avatar_glow(painter, center, r, glow);
     let mut c = avatar_color(name);
     if dim {
         c = c.gamma_multiply(0.55);
@@ -214,6 +211,14 @@ pub fn avatar(painter: &egui::Painter, center: Pos2, r: f32, name: &str, glow: f
     painter.circle_filled(center, r, c);
     let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
     painter.text(center, Align2::CENTER_CENTER, letter, xbold(r * 0.8), Color32::from_rgb(0x1B, 0x13, 0x0C));
+}
+
+/// Свечение и кольцо вокруг аватара говорящего.
+pub fn avatar_glow(painter: &egui::Painter, center: Pos2, r: f32, glow: f32) {
+    if glow > 0.01 {
+        radial_glow(painter, center, r + 6.0 + 22.0 * glow, accent_a((150.0 * glow) as u8));
+        painter.circle_stroke(center, r + 4.0, Stroke::new(2.5, ACCENT.gamma_multiply(0.5 + 0.5 * glow)));
+    }
 }
 
 /// Текст «газоразрядной лампой»: янтарь + мягкое свечение.

@@ -12,9 +12,10 @@ use eframe::egui::{
     RichText, Sense, Stroke, StrokeKind, TextEdit, TextureHandle, TextureOptions, Ui, pos2, vec2,
 };
 use egui_phosphor::regular as ph;
-use proto::{Attachment, Channel, Message, SendMessageRequest, ServerEvent, limits};
+use proto::{Attachment, Channel, Message, PublicUser, SendMessageRequest, ServerEvent, limits};
 
 use crate::api::{Api, ApiError, ApiResult};
+use crate::people::People;
 use crate::theme as t;
 
 /// Сообщения одного автора подряд в пределах этого времени — одной группой (без повторной шапки).
@@ -124,6 +125,8 @@ pub struct Chat {
     notice: Option<(String, f64)>,
     /// Ctrl+V был нажат на прошлом кадре (ловим фронт нажатия).
     paste_down: bool,
+    /// Новые данные о людях из потока событий — забирает приложение (`take_users`).
+    users_in: Vec<PublicUser>,
     /// Высота нижней панели с полем ввода, измеренная в прошлом кадре (панель egui сама не сжимается).
     composer_h: f32,
     /// Отладка: шаги AMADEUS_CHAT_SCRIPT и время последнего шага.
@@ -153,6 +156,7 @@ impl Chat {
             lightbox: None,
             notice: None,
             paste_down: false,
+            users_in: Vec::new(),
             composer_h: 64.0,
             #[cfg(debug_assertions)]
             script: (
@@ -233,6 +237,11 @@ impl Chat {
     /// Сессия истекла (поток получил 401) — пусть приложение выйдет на экран входа.
     pub fn unauthorized(&self) -> bool {
         self.unauthorized
+    }
+
+    /// Имена/аватары, пришедшие в потоке событий с прошлого вызова.
+    pub fn take_users(&mut self) -> Vec<PublicUser> {
+        std::mem::take(&mut self.users_in)
     }
 
     pub fn lightbox_open(&self) -> bool {
@@ -405,7 +414,9 @@ impl Chat {
                     merge(&mut log.msgs, vec![message]);
                 }
             }
-            // серверы, участники, каналы, голос — забирает модель (фаза 9.1)
+            ServerEvent::UserUpdated { user } => self.users_in.push(user),
+            ServerEvent::MemberUpserted { member, .. } => self.users_in.push(member.user),
+            // серверы, каналы, голос — забирает модель (фаза 9.1)
             _ => {}
         }
     }
@@ -586,7 +597,7 @@ impl Chat {
     // ------------------------------------------------------------ UI
 
     /// Центр окна для текстового канала: лента + поле ввода. `modal` — поверх открыто окно (не ловим Ctrl+V).
-    pub fn ui(&mut self, ui: &mut Ui, ch: &Channel, modal: bool) {
+    pub fn ui(&mut self, ui: &mut Ui, ch: &Channel, modal: bool, people: &People) {
         self.open(ch.id);
         let composer_id = Id::new(("composer", ch.id));
         #[cfg(debug_assertions)]
@@ -608,7 +619,7 @@ impl Chat {
             self.composer_h = need;
             ui.ctx().request_discard("chat: composer height changed");
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| self.ui_feed(ui, ch));
+        egui::CentralPanel::no_frame().show(ui, |ui| self.ui_feed(ui, ch, people));
 
         self.ui_drop_overlay(ui);
         self.ui_lightbox(ui);
@@ -639,7 +650,7 @@ impl Chat {
         }
     }
 
-    fn ui_feed(&mut self, ui: &mut Ui, ch: &Channel) {
+    fn ui_feed(&mut self, ui: &mut Ui, ch: &Channel, people: &People) {
         let me_online = self.online;
         let stream_error = self.stream_error.clone();
         let log = self.logs.entry(ch.id).or_default();
@@ -713,7 +724,7 @@ impl Chat {
                     }
                     let grouped = !new_day
                         && prev.is_some_and(|p| p.author.id == m.author.id && m.created_at - p.created_at < GROUP_GAP_SECS);
-                    if let Some(a) = self.message_row(ui, m, grouped) {
+                    if let Some(a) = self.message_row(ui, m, grouped, people) {
                         act = a;
                     }
                     prev = Some(m);
@@ -774,7 +785,8 @@ impl Chat {
     }
 
     /// Одна строка ленты: шапка группы (аватар, имя, время) или продолжение, текст и картинки.
-    fn message_row(&mut self, ui: &mut Ui, m: &Message, grouped: bool) -> Option<FeedAct> {
+    fn message_row(&mut self, ui: &mut Ui, m: &Message, grouped: bool, people: &People) -> Option<FeedAct> {
+        let author = people.resolve(crate::people::from_author(&m.author));
         let mut act = None;
         let gutter = 56.0;
         let top_pad = if grouped { 3.0 } else { 16.0 };
@@ -791,7 +803,7 @@ impl Chat {
                 if !grouped {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.label(RichText::new(&m.author.name).font(t::semibold(15.0)).color(t::avatar_color(&m.author.name)));
+                        ui.label(RichText::new(author.shown_name()).font(t::semibold(15.0)).color(t::avatar_color(&author.name)));
                         ui.label(RichText::new(time_label(m.created_at, true)).size(12.0).color(t::TEXT_MUTED));
                     });
                 }
@@ -812,7 +824,7 @@ impl Chat {
         }
         let p = ui.painter();
         if !grouped {
-            t::avatar(p, pos2(start.x + 30.0, start.y + 19.0), 18.0, &m.author.name, 0.0, false);
+            people.paint(p, pos2(start.x + 30.0, start.y + 19.0), 18.0, &author, 0.0, false);
         } else if hovered {
             p.text(pos2(start.x + 30.0, start.y + 11.0), Align2::CENTER_CENTER, time_label(m.created_at, false), t::font(11.0), t::TEXT_MUTED);
         }

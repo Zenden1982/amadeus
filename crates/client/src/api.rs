@@ -225,6 +225,43 @@ impl Api {
         Ok(resp.bytes().await.map_err(ApiError::network)?.to_vec())
     }
 
+    pub async fn servers(&self) -> ApiResult<Vec<proto::Server>> {
+        self.call::<(), _>(Method::GET, "/servers", None).await
+    }
+
+    pub async fn members(&self, server_id: i64) -> ApiResult<Vec<proto::Member>> {
+        self.call::<(), _>(Method::GET, &format!("/servers/{server_id}/members"), None).await
+    }
+
+    /// Отображаемое имя (пустая строка — сбросить на логин).
+    pub async fn update_me(&self, display_name: &str) -> ApiResult<User> {
+        let body = proto::UpdateMeRequest { display_name: Some(display_name.to_string()) };
+        self.call(Method::PATCH, "/me", Some(&body)).await
+    }
+
+    pub async fn put_avatar(&self, bytes: Vec<u8>) -> ApiResult<User> {
+        let req = self
+            .request(Method::PUT, "/me/avatar")
+            .timeout(UPLOAD_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes);
+        Self::decode(req.send().await.map_err(ApiError::network)?).await
+    }
+
+    pub async fn delete_avatar(&self) -> ApiResult<User> {
+        self.call::<(), _>(Method::DELETE, "/me/avatar", None).await
+    }
+
+    /// Картинка профиля/сервера по ключу.
+    pub async fn image(&self, key: &str) -> ApiResult<Vec<u8>> {
+        let resp = self.request(Method::GET, &format!("/images/{key}")).send().await.map_err(ApiError::network)?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(humanize(status, resp.json::<ErrorBody>().await.ok()));
+        }
+        Ok(resp.bytes().await.map_err(ApiError::network)?.to_vec())
+    }
+
     /// Открыть поток событий `GET /events` (SSE). Данные читать `Response::chunk()`.
     pub async fn events(&self) -> ApiResult<reqwest::Response> {
         let mut req = self

@@ -9,6 +9,7 @@ mod desktop;
 mod frame;
 mod metrics;
 mod mictest;
+mod people;
 mod picker;
 mod ptt;
 mod sounds;
