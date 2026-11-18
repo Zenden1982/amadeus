@@ -6,6 +6,7 @@ pub mod proxy_protocol;
 pub mod ratelimit;
 pub mod security;
 
+mod channels;
 pub mod chat;
 mod db;
 pub mod events;

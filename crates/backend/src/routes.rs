@@ -1,19 +1,17 @@
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     routing::{delete, get, post},
 };
-use livekit_api::access_token::{AccessToken, VideoGrants};
 use proto::{
-    AuthResponse, Channel, ChannelKind, CreateChannelRequest, HealthResponse,
-    JoinResponse, LoginRequest, RegisterRequest, User, limits,
+    AuthResponse, HealthResponse, LoginRequest, RegisterRequest, User, limits,
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat, events, images, invites, releases, servers,
-    db::{self, ChannelRow},
+    AppState, SESSION_TTL, channels, chat, events, images, invites, releases, servers,
+    db::{self},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
     now, perm, security,
@@ -30,9 +28,13 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
         .route("/me", get(me))
-        .route("/channels", get(list_channels).post(create_channel))
-        .route("/channels/{id}", delete(delete_channel))
-        .route("/channels/{id}/join", post(join_channel))
+        .route("/channels", get(channels::legacy_list).post(channels::legacy_create))
+        .route("/channels/{id}", axum::routing::patch(channels::update).delete(channels::delete))
+        .route("/channels/{id}/join", post(channels::join))
+        .route("/servers/{id}/channels", get(channels::list).post(channels::create))
+        .route("/servers/{id}/categories", post(channels::create_category))
+        .route("/categories/{id}", axum::routing::patch(channels::rename_category).delete(channels::delete_category))
+        .route("/servers/{id}/layout", axum::routing::put(channels::put_layout))
         .route("/invites", get(invites::legacy_list).post(invites::legacy_create))
         .route("/invites/{code}", get(invites::preview).delete(invites::revoke))
         .route("/invites/{code}/join", post(invites::join))
@@ -202,131 +204,4 @@ async fn me(user: AuthUser) -> Json<User> {
     })
 }
 
-async fn list_channels(
-    State(state): State<AppState>,
-    _user: AuthUser,
-) -> AppResult<Json<Vec<Channel>>> {
-    let rows: Vec<ChannelRow> = sqlx::query_as("SELECT id, name, kind, server_id, category_id, position, user_limit FROM channels ORDER BY id")
-        .fetch_all(&state.inner.db)
-        .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(Channel::try_from)
-            .collect::<AppResult<_>>()?,
-    ))
-}
-
-async fn create_channel(
-    State(state): State<AppState>,
-    user: AuthUser,
-    ApiJson(req): ApiJson<CreateChannelRequest>,
-) -> AppResult<(StatusCode, Json<Channel>)> {
-    // совместимость 0.2.x: каналы сервера №1
-    perm::member(&state.inner.db, 1, user.id).await.map_err(|_| AppError::Forbidden)?.require(proto::perm::MANAGE_CHANNELS)?;
-    let name = req.name.trim().to_string();
-    if name.is_empty() || name.chars().count() > limits::CHANNEL_NAME_MAX {
-        return Err(AppError::Validation(format!(
-            "название: от 1 до {} символов",
-            limits::CHANNEL_NAME_MAX
-        )));
-    }
-    let id = sqlx::query(
-        "INSERT INTO channels (name, kind, created_at, server_id, position)
-         VALUES (?, ?, ?, 1, (SELECT COALESCE(MAX(position) + 1, 0) FROM channels WHERE server_id = 1))",
-    )
-        .bind(&name)
-        .bind(req.kind.as_str())
-        .bind(now())
-        .execute(&state.inner.db)
-        .await?
-        .last_insert_rowid();
-    Ok((
-        StatusCode::CREATED,
-        Json(Channel {
-            server_id: 1,
-            category_id: None,
-            position: 0,
-            user_limit: None,
-            id,
-            name,
-            kind: req.kind,
-        }),
-    ))
-}
-
-async fn delete_channel(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<i64>,
-) -> AppResult<StatusCode> {
-    user.require_admin()?;
-    // файлы вложений канала удаляются вслед за строками (каскад в БД)
-    let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT a.storage_key FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.channel_id = ?",
-    )
-    .bind(id)
-    .fetch_all(&state.inner.db)
-    .await?;
-    let n = sqlx::query("DELETE FROM channels WHERE id = ?")
-        .bind(id)
-        .execute(&state.inner.db)
-        .await?
-        .rows_affected();
-    if n == 0 {
-        Err(AppError::NotFound)
-    } else {
-        chat::remove_files(&state, &keys).await;
-        Ok(StatusCode::NO_CONTENT)
-    }
-}
-
-/// Имя комнаты LiveKit для канала.
-pub fn room_name(channel_id: i64) -> String {
-    format!("ch-{channel_id}")
-}
-
-async fn join_channel(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<i64>,
-) -> AppResult<Json<JoinResponse>> {
-    let row: Option<ChannelRow> =
-        sqlx::query_as(db::CHANNEL_SELECT_BY_ID)
-            .bind(id)
-            .fetch_optional(&state.inner.db)
-            .await?;
-    let channel = Channel::try_from(row.ok_or(AppError::NotFound)?)?;
-    if channel.kind != ChannelKind::Voice {
-        return Err(AppError::BadRequest(
-            "в текстовый канал нельзя зайти голосом".into(),
-        ));
-    }
-    let lk = &state.inner.livekit;
-    let room = room_name(channel.id);
-    let grants = VideoGrants {
-        room_join: true,
-        room: room.clone(),
-        can_publish: Some(true),
-        can_subscribe: Some(true),
-        can_publish_data: Some(true),
-        can_publish_sources: ["microphone", "screen_share", "screen_share_audio"]
-            .map(String::from)
-            .to_vec(),
-        // имя задаёт только сервер (из токена) — участник не может переименоваться
-        can_update_own_metadata: Some(false),
-        ..Default::default()
-    };
-    let token = AccessToken::with_api_key(&lk.api_key, &lk.api_secret)
-        .with_identity(&user.id.to_string())
-        .with_name(&user.name)
-        .with_grants(grants)
-        .with_ttl(LIVEKIT_TOKEN_TTL)
-        .to_jwt()?;
-    tracing::info!(user_id = user.id, %room, "livekit token issued");
-    Ok(Json(JoinResponse {
-        livekit_url: lk.public_url.clone(),
-        livekit_token: token,
-        room,
-    }))
-}
 

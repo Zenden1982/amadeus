@@ -429,7 +429,7 @@ async fn join_issues_valid_livekit_token() {
     assert_eq!(claims.iss, LK_KEY);
     assert!(claims.video.room_join);
     assert_eq!(claims.video.room, j.room);
-    assert_eq!(claims.video.room, format!("ch-{}", voice.id));
+    assert_eq!(claims.video.room, format!("srv-1-ch-{}", voice.id));
     assert!(claims.video.can_publish() && claims.video.can_subscribe());
     assert_eq!(
         claims.video.can_publish_sources,

@@ -381,8 +381,18 @@ pub async fn get_attachment(
     .fetch_optional(&state.inner.db)
     .await?;
     let (mime, key, message_id, uploader) = row.ok_or(AppError::NotFound)?;
-    if message_id.is_none() && uploader != user.id {
-        return Err(AppError::NotFound);
+    match message_id {
+        // не отправлено — видит только загрузивший
+        None if uploader != user.id => return Err(AppError::NotFound),
+        None => {}
+        // отправлено — только участникам сервера, где канал сообщения
+        Some(mid) => {
+            let channel_id: i64 = sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ?")
+                .bind(mid)
+                .fetch_one(&state.inner.db)
+                .await?;
+            perm::channel_member(&state.inner.db, channel_id, user.id).await?;
+        }
     }
     let bytes = match tokio::fs::read(storage_path(&state, &key)).await {
         Ok(b) => b,
