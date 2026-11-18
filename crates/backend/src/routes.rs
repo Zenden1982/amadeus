@@ -10,7 +10,7 @@ use proto::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, SESSION_TTL, channels, chat, events, images, invites, releases, servers, voice,
+    AppState, SESSION_TTL, channels, chat, events, images, invites, profile, releases, servers, voice,
     db::{self},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
@@ -27,7 +27,13 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
-        .route("/me", get(me))
+        .route("/me", get(profile::me).patch(profile::update))
+        .route(
+            "/me/avatar",
+            axum::routing::put(profile::put_avatar)
+                .delete(profile::delete_avatar)
+                .layer(DefaultBodyLimit::max(limits::IMAGE_PROFILE_MAX_BYTES + 64 * 1024)),
+        )
         .route("/channels", get(channels::legacy_list).post(channels::legacy_create))
         .route("/channels/{id}", axum::routing::patch(channels::update).delete(channels::delete))
         .route("/channels/{id}/join", post(channels::join))
@@ -148,13 +154,7 @@ async fn register(
 
     let resp = new_session(
         &state,
-        User {
-            display_name: None,
-            avatar: None,
-            id,
-            name,
-            is_admin: false,
-        },
+        profile::load_user(&state.inner.db, id).await?,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(resp)))
@@ -176,7 +176,7 @@ async fn login(
     let ok =
         tokio::task::spawn_blocking(move || security::verify_password(&password, hash.as_deref()))
             .await?;
-    let Some((id, name, _, is_admin)) = row.filter(|_| ok) else {
+    let Some((id, _, _, _)) = row.filter(|_| ok) else {
         return Err(AppError::BadCredentials);
     };
     sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
@@ -184,7 +184,7 @@ async fn login(
         .execute(&state.inner.db)
         .await?;
     Ok(Json(
-        new_session(&state, User { id, name, is_admin, display_name: None, avatar: None }).await?,
+        new_session(&state, profile::load_user(&state.inner.db, id).await?).await?,
     ))
 }
 
@@ -196,14 +196,5 @@ async fn logout(State(state): State<AppState>, user: AuthUser) -> AppResult<Stat
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn me(user: AuthUser) -> Json<User> {
-    Json(User {
-        display_name: None,
-        avatar: None,
-        id: user.id,
-        name: user.name,
-        is_admin: user.is_admin,
-    })
-}
 
 

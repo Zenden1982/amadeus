@@ -12,6 +12,7 @@ mod db;
 pub mod events;
 mod images;
 mod invites;
+mod profile;
 mod servers;
 pub mod voice;
 mod extract;

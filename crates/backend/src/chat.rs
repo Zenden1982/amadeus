@@ -32,7 +32,7 @@ const PENDING_MAX: i64 = 20;
 /// Литерал (а не const), чтобы склеивать запросы через `concat!` — sqlx принимает только статические строки.
 macro_rules! select_messages {
     () => {
-        "SELECT m.id, m.channel_id, m.author_id, u.name AS author_name, m.content,
+        "SELECT m.id, m.channel_id, m.author_id, u.name AS author_name, u.display_name AS author_display, u.avatar_key AS author_avatar, m.content,
         m.created_at, m.edited_at, m.reply_to
      FROM messages m JOIN users u ON u.id = m.author_id
      WHERE m.channel_id = ? AND m.deleted_at IS NULL"
@@ -45,6 +45,8 @@ struct MessageRow {
     channel_id: i64,
     author_id: i64,
     author_name: String,
+    author_display: Option<String>,
+    author_avatar: Option<String>,
     content: String,
     created_at: i64,
     edited_at: Option<i64>,
@@ -109,8 +111,8 @@ async fn with_attachments(state: &AppState, rows: Vec<MessageRow>) -> AppResult<
             id: r.id,
             channel_id: r.channel_id,
             author: Author {
-                display_name: None,
-                avatar: None,
+                display_name: r.author_display,
+                avatar: r.author_avatar,
                 id: r.author_id,
                 name: r.author_name,
             },
