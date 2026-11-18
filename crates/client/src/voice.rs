@@ -3,7 +3,7 @@
 //! Работает в tokio-задаче. UI шлёт команды (`Cmd`) и читает общий снимок состояния
 //! (`VoiceState`) — UI-поток никогда не ждёт сеть или звук.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use crate::api::Api;
 use crate::sounds::{self, Sound};
 use crate::stream::{self, CaptureEvent, Preset};
+use crate::video::VideoHub;
 
 /// Задержка отпускания рации: хвост слова не обрезается.
 const PTT_RELEASE_DELAY: Duration = Duration::from_millis(180);
@@ -52,6 +53,10 @@ pub enum Cmd {
     StartStream { source: SourceId, title: String, width: u32, height: u32, preset: Preset, audio: bool },
     StopStream,
     DismissStreamNotice,
+    /// Смотреть / перестать смотреть трансляцию участника (подписка на её видео и звук).
+    Watch { identity: String, on: bool },
+    /// Где видна трансляция: размер на экране (физические пиксели) для SFU; невидимая — на паузе.
+    StreamView { identity: String, visible: bool, width: u32, height: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +108,8 @@ pub struct VoiceState {
     pub stream: Option<StreamInfo>,
     /// Почему трансляция остановилась сама (окно закрыто, ошибка).
     pub stream_notice: Option<String>,
+    /// Чьи трансляции мы смотрим (identity, по алфавиту).
+    pub watching: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +156,7 @@ impl Default for VoiceState {
             audio_error: None,
             stream: None,
             stream_notice: None,
+            watching: Vec::new(),
         }
     }
 }
@@ -190,7 +198,13 @@ pub struct AudioPrefs {
     pub stream_volumes: HashMap<String, f32>,
 }
 
-pub fn spawn(rt: &tokio::runtime::Handle, api: Api, prefs: AudioPrefs, repaint: Arc<dyn Fn() + Send + Sync>) -> VoiceHandle {
+pub fn spawn(
+    rt: &tokio::runtime::Handle,
+    api: Api,
+    prefs: AudioPrefs,
+    video: VideoHub,
+    repaint: Arc<dyn Fn() + Send + Sync>,
+) -> VoiceHandle {
     let (tx, rx) = mpsc::unbounded_channel();
     let (cap_tx, cap_rx) = mpsc::unbounded_channel();
     let state: Shared = Arc::new(Mutex::new(VoiceState { ptt_enabled: prefs.ptt_enabled, ..Default::default() }));
@@ -214,6 +228,10 @@ pub fn spawn(rt: &tokio::runtime::Handle, api: Api, prefs: AudioPrefs, repaint: 
         generation: 0,
         last_video_bytes: None,
         stats_n: 0,
+        video,
+        watching: HashSet::new(),
+        receivers: HashMap::new(),
+        views: HashMap::new(),
     };
     rt.spawn(engine.run(rx, cap_rx));
     VoiceHandle { tx, state }
@@ -247,6 +265,14 @@ struct Engine {
     generation: u64,
     last_video_bytes: Option<(u64, Instant)>,
     stats_n: u64,
+    /// Текстуры просматриваемых трансляций (общие с UI).
+    video: VideoHub,
+    /// Чьи трансляции смотрим; переживает переподключение, сбрасывается при выходе/смене канала.
+    watching: HashSet<String>,
+    /// Задачи приёма кадров по identity.
+    receivers: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// Последний вид из UI: (видна, ширина, высота) — повторно применяется после переподписки.
+    views: HashMap<String, (bool, u32, u32)>,
 }
 
 /// Идущая трансляция. Захват и источник живут дольше публикации: при переподключении
@@ -267,41 +293,6 @@ struct StreamSound {
     capture: Option<capture_win::AppAudio>,
     source: NativeAudioSource,
     publication: Option<LocalTrackPublication>,
-}
-
-#[cfg(debug_assertions)]
-async fn debug_count_frames(track: RemoteVideoTrack, who: String) {
-    use futures_util::StreamExt;
-    use livekit::webrtc::video_stream::native::NativeVideoStream;
-    let mut stream = NativeVideoStream::new(track.rtc_track());
-    let mut n = 0u32;
-    let mut at = Instant::now();
-    while let Some(frame) = stream.next().await {
-        n += 1;
-        if at.elapsed() >= Duration::from_secs(5) {
-            log::info!(
-                "видео от {who}: {:.1} к/с, {}×{}",
-                n as f64 / at.elapsed().as_secs_f64(),
-                frame.buffer.width(),
-                frame.buffer.height()
-            );
-            n = 0;
-            at = Instant::now();
-        }
-    }
-    log::info!("видео от {who}: поток закончился");
-}
-
-/// Аудио — всегда; видео — только по запросу (в фазе 4 смотреть его в клиенте ещё негде).
-fn subscribe_if_wanted(publication: &RemoteTrackPublication) {
-    let want = match publication.kind() {
-        TrackKind::Audio => true,
-        TrackKind::Video => cfg!(debug_assertions) && std::env::var_os("AMADEUS_SUBSCRIBE_VIDEO").is_some(),
-    };
-    log::debug!("публикация {:?} {:?}: подписка {want}", publication.kind(), publication.source());
-    if want && !publication.is_subscribed() {
-        publication.set_subscribed(true);
-    }
 }
 
 /// Понятный текст ошибки входа в канал (подробности — в логе).
@@ -443,6 +434,7 @@ impl Engine {
                 self.rejoin = None;
                 self.stop_stream().await;
                 self.leave().await;
+                self.forget_watching();
                 self.join(ch, 0).await;
             }
             Cmd::Leave => {
@@ -450,6 +442,7 @@ impl Engine {
                 let was_in = self.room.is_some();
                 self.stop_stream().await;
                 self.leave().await;
+                self.forget_watching();
                 if was_in {
                     self.play(Sound::LeaveSelf);
                 }
@@ -516,6 +509,11 @@ impl Engine {
             }
             Cmd::StopStream => self.stop_stream().await,
             Cmd::DismissStreamNotice => self.set(|s| s.stream_notice = None),
+            Cmd::Watch { identity, on } => self.set_watching(&identity, on),
+            Cmd::StreamView { identity, visible, width, height } => {
+                self.views.insert(identity.clone(), (visible, width, height));
+                self.apply_view(&identity);
+            }
         }
     }
 
@@ -563,7 +561,7 @@ impl Engine {
     async fn try_join(&mut self, ch: &Channel) -> anyhow::Result<()> {
         let join = self.api.join(ch.id).await?;
         let mut opts = RoomOptions::default();
-        // Видео (трансляции) не тянем без надобности — канал зрителя не тратится (просмотр — фаза 6).
+        // Подписки — вручную: голос всегда, трансляции (видео + звук) — только по «Смотреть» (канал зрителя не тратится).
         opts.auto_subscribe = false;
         opts.adaptive_stream = true;
         opts.dynacast = true;
@@ -604,12 +602,8 @@ impl Engine {
                 }
             }
         }
-        for p in room.remote_participants().values() {
-            for publication in p.track_publications().values() {
-                subscribe_if_wanted(publication);
-            }
-        }
         self.room = Some((room, events));
+        self.sync_subscriptions();
         self.mic = mic;
         self.last_peers.clear();
         self.apply_mic();
@@ -618,6 +612,7 @@ impl Engine {
     }
 
     fn drop_room(&mut self) {
+        self.stop_receivers();
         self.mic = None;
         if let Some(st) = &mut self.stream {
             st.publication = None;
@@ -629,6 +624,7 @@ impl Engine {
     }
 
     async fn leave(&mut self) {
+        self.stop_receivers();
         self.mic = None;
         if let Some(st) = &mut self.stream {
             st.publication = None;
@@ -671,6 +667,7 @@ impl Engine {
             }
             RoomEvent::ParticipantDisconnected(p) => {
                 log::info!("- {} ({})", p.name(), p.identity());
+                self.set_watching(p.identity().as_str(), false);
                 self.play(Sound::LeaveOther);
                 self.refresh_peers(false);
             }
@@ -682,25 +679,42 @@ impl Engine {
                         a.rtc_track().set_volume(v as f64);
                     }
                     RemoteTrack::Video(v) => {
-                        log::info!("подписка на видео {}", participant.identity());
-                        // Просмотра ещё нет (фаза 6); в отладке считаем принятые кадры.
-                        #[cfg(debug_assertions)]
-                        tokio::spawn(debug_count_frames(v, participant.identity().to_string()));
-                        #[cfg(not(debug_assertions))]
-                        let _ = v;
+                        let id = participant.identity().as_str().to_string();
+                        if publication.source() == TrackSource::Screenshare && self.watching.contains(&id) {
+                            log::info!("смотрим трансляцию {id}");
+                            if let Some(old) = self.receivers.insert(id.clone(), self.video.spawn_receiver(id.clone(), v)) {
+                                old.abort();
+                            }
+                            self.apply_view(&id);
+                        } else {
+                            // Пришло то, что уже не нужно (успели нажать «Перестать смотреть»).
+                            publication.set_subscribed(false);
+                        }
                     }
                 }
                 self.refresh_peers(false);
             }
             RoomEvent::TrackPublished { publication, participant } => {
                 log::info!("{} опубликовал {:?}", participant.identity(), publication.source());
-                subscribe_if_wanted(&publication);
+                self.sync_subscription(participant.identity().as_str(), &publication);
+                self.refresh_peers(false);
+            }
+            RoomEvent::TrackUnpublished { publication, participant } => {
+                log::info!("{} снял {:?}", participant.identity(), publication.source());
+                if publication.source() == TrackSource::Screenshare {
+                    // Трансляция закончилась — перестаём «смотреть» (новую стример покажет заново, как в Discord).
+                    self.set_watching(participant.identity().as_str(), false);
+                }
+                self.refresh_peers(false);
+            }
+            RoomEvent::TrackUnsubscribed { publication, participant, .. } => {
+                if publication.source() == TrackSource::Screenshare {
+                    self.stop_receiver(participant.identity().as_str());
+                }
                 self.refresh_peers(false);
             }
             RoomEvent::TrackMuted { .. }
             | RoomEvent::TrackUnmuted { .. }
-            | RoomEvent::TrackUnpublished { .. }
-            | RoomEvent::TrackUnsubscribed { .. }
             | RoomEvent::ActiveSpeakersChanged { .. }
             | RoomEvent::ParticipantNameChanged { .. } => self.refresh_peers(false),
             RoomEvent::Reconnecting => self.set(|s| s.conn = Conn::Reconnecting),
@@ -1008,7 +1022,7 @@ impl Engine {
         }
     }
 
-    /// Входящее видео (пока только в лог: просмотр — фаза 6; в debug — AMADEUS_SUBSCRIBE_VIDEO=1).
+    /// Входящее видео трансляций — в лог (раз в 5 опросов).
     fn log_inbound_video(&self, stats: &[RtcStats]) {
         if !self.stats_n.is_multiple_of(5) {
             return;
@@ -1149,6 +1163,94 @@ impl Engine {
             for publication in p.track_publications().values() {
                 if let Some(RemoteTrack::Audio(a)) = publication.track() {
                     a.rtc_track().set_volume(self.volume_for(id.as_str(), publication.source()) as f64);
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- просмотр трансляций
+
+    /// Нужна ли нам эта публикация: голос — всегда, трансляция (видео и её звук) — только если смотрим.
+    fn wants(&self, identity: &str, publication: &RemoteTrackPublication) -> bool {
+        match publication.source() {
+            TrackSource::Screenshare | TrackSource::ScreenshareAudio => self.watching.contains(identity),
+            _ => publication.kind() == TrackKind::Audio,
+        }
+    }
+
+    fn sync_subscription(&self, identity: &str, publication: &RemoteTrackPublication) {
+        let want = self.wants(identity, publication);
+        if want != publication.is_desired() {
+            log::debug!("{identity} {:?}: подписка {want}", publication.source());
+            publication.set_subscribed(want);
+        }
+    }
+
+    fn sync_subscriptions(&self) {
+        let Some((room, _)) = &self.room else { return };
+        for (id, p) in room.remote_participants() {
+            for publication in p.track_publications().values() {
+                self.sync_subscription(id.as_str(), publication);
+            }
+        }
+    }
+
+    fn set_watching(&mut self, identity: &str, on: bool) {
+        let changed = if on { self.watching.insert(identity.to_string()) } else { self.watching.remove(identity) };
+        if !changed {
+            return;
+        }
+        log::info!("трансляция {identity}: {}", if on { "смотрим" } else { "не смотрим" });
+        if !on {
+            self.stop_receiver(identity);
+            self.views.remove(identity);
+        }
+        self.sync_subscriptions();
+        self.publish_watching();
+    }
+
+    /// Выход из канала / другой канал: ничего не смотрим.
+    fn forget_watching(&mut self) {
+        self.stop_receivers();
+        self.watching.clear();
+        self.views.clear();
+        self.publish_watching();
+    }
+
+    fn publish_watching(&self) {
+        let mut list: Vec<String> = self.watching.iter().cloned().collect();
+        list.sort();
+        self.set(|s| s.watching = list);
+    }
+
+    fn stop_receiver(&mut self, identity: &str) {
+        if let Some(h) = self.receivers.remove(identity) {
+            h.abort();
+        }
+        self.video.remove(identity);
+    }
+
+    fn stop_receivers(&mut self) {
+        for (_, h) in self.receivers.drain() {
+            h.abort();
+        }
+        self.video.clear();
+    }
+
+    /// Размер на экране → SFU (adaptive stream); невидимая трансляция ставится на паузу (SFU не шлёт пакеты).
+    fn apply_view(&self, identity: &str) {
+        let (Some((room, _)), Some(&(visible, w, h))) = (&self.room, self.views.get(identity)) else { return };
+        let Some(p) = room.remote_participants().into_iter().find(|(id, _)| id.as_str() == identity).map(|(_, p)| p) else {
+            return;
+        };
+        for publication in p.track_publications().values() {
+            if publication.source() == TrackSource::Screenshare && publication.is_subscribed() {
+                if visible && w > 0 && h > 0 {
+                    publication.update_video_dimensions(TrackDimension(w, h));
+                }
+                if publication.is_enabled() != visible {
+                    log::info!("трансляция {identity}: {}", if visible { "видна — поток включён" } else { "скрыта — поток на паузе" });
+                    publication.set_enabled(visible);
                 }
             }
         }

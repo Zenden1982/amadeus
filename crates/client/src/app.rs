@@ -19,6 +19,7 @@ use crate::mictest::{self, MicTest};
 use crate::picker::{self, Picker};
 use crate::ptt::{self, Ptt};
 use crate::theme::{self as t, DockStyle};
+use crate::video::VideoHub;
 use crate::voice::{self, AudioPrefs, Cmd, Conn, Peer, VoiceHandle, VoiceState};
 
 /// (микрофон, вывод, шумоподавление, автогромкость, слышать себя).
@@ -93,6 +94,20 @@ pub struct App {
     mic_playback: bool,
     /// Пикер источника трансляции.
     picker: Option<Picker>,
+    /// Кадры просматриваемых трансляций.
+    video: VideoHub,
+    /// Трансляция в «большом виде» (identity); `None` — сетка.
+    focus: Option<String>,
+    /// Полноэкранный просмотр трансляции `focus`.
+    fullscreen: bool,
+    /// Что последним сообщили движку о видимости/размере трансляций.
+    views_sent: HashMap<String, (bool, u32, u32)>,
+    /// Последнее движение мыши (в полном экране панель и курсор прячутся).
+    pointer_moved_at: Instant,
+    /// Какие трансляции нарисованы в текущем кадре и какого размера (физ. пиксели).
+    views_frame: HashMap<String, (u32, u32)>,
+    /// «Смотреть» нажато, движок ещё не подтвердил (фокус не сбрасывать).
+    watch_pending: Option<(String, Instant)>,
 }
 
 impl App {
@@ -116,7 +131,8 @@ impl App {
             volumes: settings.user_volume.keys().map(|k| (k.clone(), settings.effective_volume(k))).collect::<HashMap<_, _>>(),
             stream_volumes: settings.stream_volume.clone(),
         };
-        let voice = voice::spawn(rt.handle(), api.clone(), prefs, repaint.clone());
+        let video = VideoHub::new(&ctx);
+        let voice = voice::spawn(rt.handle(), api.clone(), prefs, video.clone(), repaint.clone());
         let (ptt_tx, ptt_rx) = std_mpsc::channel();
         let ptt = Ptt::start(settings.ptt_key, settings.ptt_enabled, voice.sender(), ptt_tx, repaint);
         // Отладка: AMADEUS_START_DEAF=1 — второй клиент на том же ПК без заводки через колонки.
@@ -162,6 +178,13 @@ impl App {
             mic_level: Arc::new(AtomicU32::new(0)),
             mic_playback: false,
             picker: None,
+            video,
+            focus: None,
+            fullscreen: false,
+            views_sent: HashMap::new(),
+            pointer_moved_at: Instant::now(),
+            views_frame: HashMap::new(),
+            watch_pending: None,
         };
         if has_token {
             app.fetch_me();
@@ -547,10 +570,21 @@ impl App {
         let mut vs = self.voice.snapshot();
         #[cfg(debug_assertions)]
         if std::env::var_os("AMADEUS_DEMO").is_some() {
+            let watching = std::mem::take(&mut vs.watching);
             vs = demo_state(ui.input(|i| i.time));
+            vs.watching = watching;
+            self.demo_frames(ui, &vs);
         }
         #[cfg(debug_assertions)]
         self.debug_autostream(&vs);
+        #[cfg(debug_assertions)]
+        self.debug_autowatch(ui, &vs);
+        self.sync_focus(ui, &vs);
+        if self.fullscreen {
+            self.ui_fullscreen(ui, &vs);
+            self.report_views(&vs);
+            return;
+        }
         self.ui_sidebar(ui, &vs);
         self.ui_header(ui, &vs);
         self.ui_dock(ui, &vs);
@@ -565,6 +599,51 @@ impl App {
         if self.picker.is_some() {
             self.ui_picker(ui, &vs);
         }
+        self.report_views(&vs);
+    }
+
+    /// Отладка: AMADEUS_AUTOWATCH=1 — сразу смотреть каждую трансляцию в канале
+    /// (+ AMADEUS_AUTOFULLSCREEN=1 — развернуть на весь экран, когда придёт первый кадр).
+    #[cfg(debug_assertions)]
+    fn debug_autowatch(&mut self, ui: &Ui, vs: &VoiceState) {
+        use std::sync::Mutex;
+        static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if std::env::var_os("AMADEUS_AUTOWATCH").is_none() || vs.conn != Conn::Connected {
+            return;
+        }
+        let mut asked = ASKED.lock().unwrap();
+        for p in vs.peers.iter().filter(|p| p.streaming && !p.is_local) {
+            if !asked.contains(&p.identity) {
+                asked.push(p.identity.clone());
+                self.watch(&p.identity);
+            }
+        }
+        if std::env::var_os("AMADEUS_AUTOFULLSCREEN").is_some()
+            && let Some(f) = self.focus.clone()
+            && self.video.frame(&f).is_some()
+            && !FULL.swap(true, Ordering::Relaxed)
+        {
+            log::info!("AMADEUS_AUTOFULLSCREEN: полный экран");
+            self.set_fullscreen(ui.ctx(), true);
+        }
+    }
+
+    /// Демо-кадры для просматриваемых «трансляций» (AMADEUS_DEMO), ~10 к/с.
+    #[cfg(debug_assertions)]
+    fn demo_frames(&mut self, ui: &Ui, vs: &VoiceState) {
+        use std::sync::Mutex;
+        static AT: Mutex<Option<Instant>> = Mutex::new(None);
+        let mut at = AT.lock().unwrap();
+        if at.is_some_and(|t| t.elapsed() < Duration::from_millis(100)) {
+            return;
+        }
+        *at = Some(Instant::now());
+        let time = ui.input(|i| i.time) as f32;
+        for id in &vs.watching {
+            self.video.put_demo(id, time);
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
 
     /// Отладка: AMADEUS_AUTOSTREAM=screen | <часть заголовка окна> [+ AMADEUS_STREAM_PRESET=720|1080|1080p60|native] —
@@ -869,47 +948,320 @@ impl App {
             (Conn::Connecting, Some(_)) if vs.peers.is_empty() => {
                 ui.painter().text(r.center(), Align2::CENTER_CENTER, "Подключаемся…", t::semibold(16.0), t::DUST);
             }
-            _ => self.ui_tiles(ui, vs),
+            _ => self.ui_room(ui, vs),
         }
     }
 
-    fn ui_tiles(&mut self, ui: &mut Ui, vs: &VoiceState) {
+    /// Комната: сетка (участники + трансляции) или «большой вид» трансляции с лентой остальных.
+    fn ui_room(&mut self, ui: &mut Ui, vs: &VoiceState) {
         let r = ui.max_rect();
-        let n = vs.peers.len().max(1);
-        let cols = match n {
-            1 => 1,
-            2 => 2,
-            3 | 5 | 6 | 9 => 3,
-            4 => 2,
-            _ => 4,
-        };
-        let rows = n.div_ceil(cols);
-        let gap = 16.0;
-        let tw = (r.width() - gap * (cols - 1) as f32) / cols as f32;
-        let th = ((r.height() - gap * (rows - 1) as f32) / rows as f32).min(tw * 0.8);
-        let total_h = th * rows as f32 + gap * (rows - 1) as f32;
-        let top = r.top() + (r.height() - total_h) / 2.0;
-        for (i, p) in vs.peers.iter().enumerate() {
-            let (row, col) = (i / cols, i % cols);
-            let in_row = if row == rows - 1 { n - row * cols } else { cols };
-            let row_w = tw * in_row as f32 + gap * (in_row - 1) as f32;
-            let left = r.left() + (r.width() - row_w) / 2.0;
-            let rect = Rect::from_min_size(pos2(left + col as f32 * (tw + gap), top + row as f32 * (th + gap)), vec2(tw, th));
-            let resp = ui.interact(rect, Id::new(("tile", &p.identity)), Sense::click());
-            let glow = speak_glow(ui, p);
-            tile(ui, rect, p, glow);
-            if resp.clicked() && !p.is_local {
-                self.popup = Some(VolumePopup {
-                    identity: p.identity.clone(),
-                    name: p.name.clone(),
-                    pos: resp.interact_pointer_pos().unwrap_or(rect.center()),
-                    opened_at: Instant::now(),
-                });
+        // Трансляции — первыми (как в Discord), затем участники.
+        let mut items: Vec<Item> = vs.peers.iter().filter(|p| p.streaming).map(Item::Stream).collect();
+        items.extend(vs.peers.iter().map(Item::Person));
+        let focused = self.focus.as_ref().and_then(|f| items.iter().position(|i| matches!(i, Item::Stream(p) if &p.identity == f)));
+        let Some(fi) = focused else {
+            let aspect = if items.iter().any(|i| matches!(i, Item::Stream(_))) { 9.0 / 16.0 } else { 0.8 };
+            for (item, rect) in items.iter().zip(grid_rects(r, items.len(), aspect, 16.0)) {
+                self.ui_item(ui, rect, *item, vs, false);
             }
-            if !p.is_local {
-                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            return;
+        };
+        let big_item = items.remove(fi);
+        let gap = 14.0;
+        let strip_h = if items.is_empty() { 0.0 } else { (r.height() * 0.2).clamp(120.0, 160.0) };
+        let big = Rect::from_min_max(r.min, pos2(r.right(), r.bottom() - if strip_h > 0.0 { strip_h + gap } else { 0.0 }));
+        self.ui_item(ui, big, big_item, vs, true);
+        if strip_h > 0.0 {
+            // 16:9, а если не помещаются все — уже (но не меньше 130 px), остальные за краем.
+            let n = items.len() as f32;
+            let tw = (strip_h * 16.0 / 9.0).min((r.width() - gap * (n - 1.0)) / n).max(130.0);
+            let fit = (((r.width() + gap) / (tw + gap)).floor() as usize).max(1).min(items.len());
+            let row_w = tw * fit as f32 + gap * (fit - 1) as f32;
+            let left = r.center().x - row_w / 2.0;
+            for (i, item) in items.iter().take(fit).enumerate() {
+                let rect = Rect::from_min_size(pos2(left + i as f32 * (tw + gap), r.bottom() - strip_h), vec2(tw, strip_h));
+                self.ui_item(ui, rect, *item, vs, false);
             }
         }
+    }
+
+    fn ui_item(&mut self, ui: &mut Ui, rect: Rect, item: Item, vs: &VoiceState, big: bool) {
+        match item {
+            Item::Person(p) => {
+                let resp = ui.interact(rect, Id::new(("tile", &p.identity)), Sense::click());
+                let glow = speak_glow(ui, p);
+                tile(ui, rect, p, glow);
+                if resp.clicked() && !p.is_local {
+                    self.open_popup(p, resp.interact_pointer_pos().unwrap_or(rect.center()));
+                }
+                if !p.is_local {
+                    resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                }
+            }
+            Item::Stream(p) => self.stream_tile(ui, rect, p, vs, big),
+        }
+    }
+
+    fn open_popup(&mut self, p: &Peer, pos: Pos2) {
+        self.popup = Some(VolumePopup { identity: p.identity.clone(), name: p.name.clone(), pos, opened_at: Instant::now() });
+    }
+
+    /// Плитка трансляции: «Смотреть» → видео (вписано с полями) → по клику большой вид, двойной клик — полный экран.
+    fn stream_tile(&mut self, ui: &mut Ui, rect: Rect, p: &Peer, vs: &VoiceState, big: bool) {
+        let watching = vs.watching.contains(&p.identity);
+        let resp = ui.interact(rect, Id::new(("stream", &p.identity)), Sense::click());
+        let hovered = ui.rect_contains_pointer(rect);
+        let painter = ui.painter().clone();
+        let radius = CornerRadius::same(12);
+        painter.rect_filled(rect, radius, VIDEO_BG);
+        let small = rect.height() < 200.0;
+
+        if p.is_local {
+            // Своё видео не декодируем (лишняя нагрузка) — только подпись.
+            let title = vs.stream.as_ref().map(|s| s.title.clone()).unwrap_or_default();
+            let c = rect.center();
+            painter.text(c - vec2(0.0, if small { 14.0 } else { 26.0 }), Align2::CENTER_CENTER, ph::MONITOR_ARROW_UP, t::font(if small { 26.0 } else { 40.0 }), t::NIXIE);
+            painter.text(c + vec2(0.0, if small { 12.0 } else { 14.0 }), Align2::CENTER_CENTER, "Вы транслируете", t::bold(if small { 13.0 } else { 15.0 }), t::PAPER);
+            if !small {
+                painter.text(c + vec2(0.0, 36.0), Align2::CENTER_CENTER, ellipsize(&title, 40), t::font(13.0), t::DUST);
+            }
+        } else if watching {
+            match self.video.frame(&p.identity) {
+                Some(f) => {
+                    let vr = fit_rect(rect, f.size);
+                    egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).corner_radius(radius).paint_at(ui, vr);
+                    self.mark_view(&p.identity, vr, ui.ctx().pixels_per_point());
+                    if f.stale {
+                        chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Нет новых кадров — стример свернул окно или пропала связь", ph::HOURGLASS), t::DUST);
+                    }
+                    if big && hovered && f.fps > 0.0 {
+                        chip(&painter, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, &format!("{}×{} · {:.0} к/с", f.size[0], f.size[1], f.fps), t::DUST);
+                    }
+                }
+                None => {
+                    self.mark_view(&p.identity, rect, ui.ctx().pixels_per_point());
+                    egui::Spinner::new().size(30.0).color(t::NIXIE).paint_at(ui, Rect::from_center_size(rect.center() - vec2(0.0, 12.0), vec2(30.0, 30.0)));
+                    painter.text(rect.center() + vec2(0.0, 22.0), Align2::CENTER_CENTER, "Подключаемся к трансляции…", t::font(13.0), t::DUST);
+                    ui.ctx().request_repaint_after(Duration::from_millis(50));
+                }
+            }
+        } else {
+            // Не смотрим: аватар стримера и «Смотреть» (канал не тратится, пока не нажали).
+            t::radial_glow(&painter, rect.center(), rect.width().min(rect.height()) * 0.6, t::nixie_a(if hovered { 22 } else { 12 }));
+            // Совсем маленькая плитка (лента, много трансляций) — только кнопка, без аватара.
+            let tiny = rect.height() < 140.0;
+            let ar = (rect.height() * 0.16).clamp(16.0, 34.0);
+            let ac = rect.center() - vec2(0.0, ar + if small { 4.0 } else { 14.0 });
+            if !tiny {
+                t::avatar(&painter, ac, ar, &p.name, 0.0, false);
+            }
+            if !small {
+                painter.text(ac + vec2(0.0, ar + 18.0), Align2::CENTER_CENTER, format!("{} транслирует экран", p.name), t::semibold(14.0), t::PAPER);
+            }
+            let bw = if small { 116.0 } else { 150.0 };
+            let by = if tiny { rect.center().y - 4.0 } else { ac.y + ar + if small { 22.0 } else { 52.0 } };
+            let br = Rect::from_center_size(pos2(rect.center().x, by), vec2(bw, if small { 30.0 } else { 38.0 }));
+            painter.rect_filled(br, CornerRadius::same(255), if hovered { t::FILAMENT } else { t::NIXIE });
+            painter.text(br.center(), Align2::CENTER_CENTER, format!("{}  Смотреть", ph::PLAY), t::bold(if small { 13.0 } else { 14.5 }), t::ON_NIXIE);
+        }
+
+        let stroke = if big || (watching && hovered) {
+            Stroke::new(1.0, t::nixie_a(120))
+        } else if hovered {
+            Stroke::new(1.0, t::BRASS)
+        } else {
+            Stroke::new(1.0, t::BRASS_DIM)
+        };
+        painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
+        live_badge(&painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
+        chip(&painter, rect.left_bottom() + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, p.name), t::PAPER);
+
+        if p.is_local {
+            return;
+        }
+        // Кнопки поверх видео (появляются при наведении).
+        let mut act = None;
+        if watching && hovered {
+            let mut c = pos2(rect.right() - 30.0, rect.bottom() - 30.0);
+            if overlay_button(ui, c, ph::X, "Перестать смотреть", Id::new(("s-stop", &p.identity))).clicked() {
+                act = Some(StreamAct::Unwatch);
+            }
+            c.x -= 44.0;
+            if overlay_button(ui, c, ph::CORNERS_OUT, "Полный экран (F11)", Id::new(("s-full", &p.identity))).clicked() {
+                act = Some(StreamAct::Fullscreen);
+            }
+            if big {
+                c.x -= 44.0;
+                if overlay_button(ui, c, ph::SQUARES_FOUR, "Все участники (Esc)", Id::new(("s-grid", &p.identity))).clicked() {
+                    act = Some(StreamAct::Grid);
+                }
+            }
+        }
+        if act.is_none() {
+            if resp.double_clicked() && watching {
+                act = Some(StreamAct::Fullscreen);
+            } else if resp.clicked() {
+                act = Some(if watching { StreamAct::Focus } else { StreamAct::Watch });
+            } else if resp.secondary_clicked() {
+                self.open_popup(p, resp.interact_pointer_pos().unwrap_or(rect.center()));
+            }
+        }
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        match act {
+            Some(StreamAct::Watch) => {
+                // Как в Discord: «Смотреть» сразу открывает трансляцию крупно.
+                self.watch(&p.identity);
+            }
+            Some(StreamAct::Focus) => self.focus = Some(p.identity.clone()),
+            Some(StreamAct::Fullscreen) => {
+                self.focus = Some(p.identity.clone());
+                self.set_fullscreen(ui.ctx(), true);
+            }
+            Some(StreamAct::Grid) => self.focus = None,
+            Some(StreamAct::Unwatch) => self.unwatch(ui.ctx(), &p.identity),
+            None => {}
+        }
+    }
+
+    fn watch(&mut self, identity: &str) {
+        self.voice.send(Cmd::Watch { identity: identity.to_string(), on: true });
+        self.watch_pending = Some((identity.to_string(), Instant::now()));
+        self.focus = Some(identity.to_string());
+    }
+
+    fn unwatch(&mut self, ctx: &egui::Context, identity: &str) {
+        self.voice.send(Cmd::Watch { identity: identity.to_string(), on: false });
+        if self.focus.as_deref() == Some(identity) {
+            self.focus = None;
+            self.set_fullscreen(ctx, false);
+        }
+    }
+
+    fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        if self.fullscreen != on {
+            self.fullscreen = on;
+            self.pointer_moved_at = Instant::now();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        }
+    }
+
+    /// Трансляция нарисована в `rect` в этом кадре (для отчёта движку о видимости и размере).
+    fn mark_view(&mut self, identity: &str, rect: Rect, ppp: f32) {
+        self.views_frame.insert(identity.to_string(), ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32));
+    }
+
+    /// Сообщает движку, какие трансляции видны и какого они размера; невидимые SFU ставит на паузу.
+    fn report_views(&mut self, vs: &VoiceState) {
+        let seen = std::mem::take(&mut self.views_frame);
+        for id in &vs.watching {
+            let (visible, w, h) = match seen.get(id) {
+                Some(&(w, h)) => (true, w, h),
+                None => (false, 0, 0),
+            };
+            let changed = |a: u32, b: u32| (a as f32 - b as f32).abs() > 0.2 * a.max(b).max(1) as f32;
+            let send = match self.views_sent.get(id) {
+                None => true,
+                Some(&(v, pw, ph)) => v != visible || (visible && (changed(pw, w) || changed(ph, h))),
+            };
+            if send {
+                self.views_sent.insert(id.clone(), (visible, w, h));
+                self.voice.send(Cmd::StreamView { identity: id.clone(), visible, width: w, height: h });
+            }
+        }
+        self.views_sent.retain(|id, _| vs.watching.contains(id));
+    }
+
+    /// Фокус/полный экран: сброс, если трансляция закончилась; клавиши F11 и Esc.
+    fn sync_focus(&mut self, ui: &Ui, vs: &VoiceState) {
+        let ctx = ui.ctx().clone();
+        if self.watch_pending.as_ref().is_some_and(|(id, at)| vs.watching.contains(id) || at.elapsed() > Duration::from_secs(2)) {
+            self.watch_pending = None;
+        }
+        let pending = self.watch_pending.as_ref().map(|(id, _)| id.clone());
+        let alive = |id: &str| {
+            (vs.watching.iter().any(|w| w == id) || pending.as_deref() == Some(id)) && vs.peers.iter().any(|p| p.identity == id && p.streaming)
+        };
+        if let Some(f) = &self.focus
+            && !alive(f)
+        {
+            self.focus = None;
+        }
+        if self.fullscreen && self.focus.is_none() {
+            self.set_fullscreen(&ctx, false);
+        }
+        let modal_open = self.settings_open || self.picker.is_some() || self.popup.is_some();
+        let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
+        if f11 && !modal_open {
+            if self.fullscreen {
+                self.set_fullscreen(&ctx, false);
+            } else {
+                if self.focus.is_none() {
+                    // Смотрим ровно одну трансляцию — F11 сразу разворачивает её.
+                    let watched: Vec<&String> = vs.watching.iter().filter(|w| alive(w)).collect();
+                    if let [one] = watched.as_slice() {
+                        self.focus = Some((*one).clone());
+                    }
+                }
+                if self.focus.is_some() {
+                    self.set_fullscreen(&ctx, true);
+                }
+            }
+        }
+        if esc && !modal_open {
+            if self.fullscreen {
+                self.set_fullscreen(&ctx, false);
+            } else if self.focus.is_some() {
+                self.focus = None;
+            }
+        }
+    }
+
+    /// Полноэкранный просмотр: только видео; панель и курсор прячутся, пока мышь не двигается.
+    fn ui_fullscreen(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        let Some(id) = self.focus.clone() else { return };
+        let Some(p) = vs.peers.iter().find(|p| p.identity == id) else { return };
+        if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_down()) {
+            self.pointer_moved_at = Instant::now();
+        }
+        let idle = self.pointer_moved_at.elapsed() > Duration::from_millis(2500);
+        egui::CentralPanel::no_frame().frame(Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
+            let r = ui.max_rect();
+            let resp = ui.interact(r, Id::new("fs-video"), Sense::click());
+            match self.video.frame(&id) {
+                Some(f) => {
+                    let vr = fit_rect(r, f.size);
+                    egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).paint_at(ui, vr);
+                    self.mark_view(&id, vr, ui.ctx().pixels_per_point());
+                    if !idle {
+                        chip(ui.painter(), r.left_top() + vec2(20.0, 20.0), Align2::LEFT_TOP, &format!("{}  {} · {}×{} · {:.0} к/с", ph::MONITOR, p.name, f.size[0], f.size[1], f.fps), t::PAPER);
+                    }
+                }
+                None => {
+                    self.mark_view(&id, r, ui.ctx().pixels_per_point());
+                    egui::Spinner::new().size(36.0).color(t::NIXIE).paint_at(ui, Rect::from_center_size(r.center(), vec2(36.0, 36.0)));
+                }
+            }
+            if idle {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                // Проверить ещё раз, когда пора прятать/показывать.
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+                if resp.double_clicked() {
+                    self.set_fullscreen(ui.ctx(), false);
+                }
+                return;
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+            chip(ui.painter(), pos2(r.center().x, r.top() + 20.0), Align2::CENTER_TOP, "Esc или двойной клик — выйти из полного экрана", t::DUST);
+            let mut c = pos2(r.right() - 36.0, r.bottom() - 36.0);
+            if overlay_button(ui, c, ph::X, "Перестать смотреть", Id::new("fs-stop")).clicked() {
+                self.unwatch(ui.ctx(), &id);
+                return;
+            }
+            c.x -= 44.0;
+            if overlay_button(ui, c, ph::CORNERS_IN, "Выйти из полного экрана (Esc)", Id::new("fs-exit")).clicked() || resp.double_clicked() {
+                self.set_fullscreen(ui.ctx(), false);
+            }
+        });
     }
 
     fn ui_banner(&mut self, ui: &mut Ui, vs: &VoiceState) {
@@ -1293,7 +1645,7 @@ fn demo_state(time: f64) -> VoiceState {
         speaking,
         level: if speaking { (0.15 + 0.15 * (time * 7.0).sin().abs()) as f32 } else { 0.0 },
         mic_muted: muted,
-        streaming: id == "kurisu",
+        streaming: id == "kurisu" || (id == "daru" && std::env::var_os("AMADEUS_DEMO_STREAMS").is_some()),
     };
     VoiceState {
         conn: if std::env::var_os("AMADEUS_DEMO_RECONNECT").is_some() { Conn::Reconnecting } else { Conn::Connected },
@@ -1311,6 +1663,82 @@ fn demo_state(time: f64) -> VoiceState {
 }
 
 // ------------------------------------------------------------ мелкие виджеты
+
+/// Фон под видео (поля при вписывании).
+const VIDEO_BG: Color32 = Color32::from_rgb(0x0C, 0x0A, 0x08);
+
+/// Элемент сцены комнаты.
+#[derive(Clone, Copy)]
+enum Item<'a> {
+    Person(&'a Peer),
+    Stream(&'a Peer),
+}
+
+enum StreamAct {
+    Watch,
+    Focus,
+    Fullscreen,
+    Grid,
+    Unwatch,
+}
+
+/// Раскладка n плиток сеткой по центру `r`; высота плитки не больше `aspect` × ширина.
+fn grid_rects(r: Rect, n: usize, aspect: f32, gap: f32) -> Vec<Rect> {
+    let n = n.max(1);
+    let cols = match n {
+        1 => 1,
+        2 => 2,
+        3 | 5 | 6 | 9 => 3,
+        4 => 2,
+        _ => 4,
+    };
+    let rows = n.div_ceil(cols);
+    let tw = (r.width() - gap * (cols - 1) as f32) / cols as f32;
+    let th = ((r.height() - gap * (rows - 1) as f32) / rows as f32).min(tw * aspect);
+    let total_h = th * rows as f32 + gap * (rows - 1) as f32;
+    let top = r.top() + (r.height() - total_h) / 2.0;
+    (0..n)
+        .map(|i| {
+            let (row, col) = (i / cols, i % cols);
+            let in_row = if row == rows - 1 { n - row * cols } else { cols };
+            let row_w = tw * in_row as f32 + gap * (in_row - 1) as f32;
+            let left = r.left() + (r.width() - row_w) / 2.0;
+            Rect::from_min_size(pos2(left + col as f32 * (tw + gap), top + row as f32 * (th + gap)), vec2(tw, th))
+        })
+        .collect()
+}
+
+/// Вписать видео `size` в `outer` с сохранением пропорций (поля по краям).
+fn fit_rect(outer: Rect, size: [usize; 2]) -> Rect {
+    let (w, h) = (size[0].max(1) as f32, size[1].max(1) as f32);
+    let s = (outer.width() / w).min(outer.height() / h);
+    Rect::from_center_size(outer.center(), vec2(w * s, h * s))
+}
+
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() > max { s.chars().take(max - 1).chain(['…']).collect() } else { s.to_string() }
+}
+
+/// Полупрозрачная подпись поверх видео.
+fn chip(painter: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, color: Color32) {
+    let galley = painter.layout_no_wrap(text.to_string(), t::semibold(13.0), color);
+    let size = galley.size() + vec2(18.0, 10.0);
+    let r = anchor.anchor_size(pos, size);
+    painter.rect_filled(r, CornerRadius::same(7), Color32::from_rgba_unmultiplied(8, 6, 4, 190));
+    painter.galley(r.min + vec2(9.0, 5.0), galley, color);
+}
+
+/// Круглая кнопка поверх видео.
+fn overlay_button(ui: &Ui, center: Pos2, icon: &str, tip: &str, id: Id) -> egui::Response {
+    let rect = Rect::from_center_size(center, vec2(36.0, 36.0));
+    let resp = ui.interact(rect, id, Sense::click());
+    let hot = resp.hovered();
+    let p = ui.painter();
+    p.circle_filled(center, 18.0, Color32::from_rgba_unmultiplied(8, 6, 4, if hot { 235 } else { 170 }));
+    p.circle_stroke(center, 18.0, Stroke::new(1.0, if hot { t::nixie_a(160) } else { t::BRASS }));
+    p.text(center, Align2::CENTER_CENTER, icon, t::font(18.0), if hot { t::FILAMENT } else { t::PAPER });
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
 
 fn label(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(13.0).color(t::DUST));

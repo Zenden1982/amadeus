@@ -10,6 +10,7 @@ mod ptt;
 mod sounds;
 mod stream;
 mod theme;
+mod video;
 mod voice;
 
 // Символ STL 14.44 для предкомпилированного libwebrtc (см. crates/msvc-shim).
