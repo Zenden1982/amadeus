@@ -204,27 +204,11 @@ pub fn nixie_text(painter: &egui::Painter, pos: Pos2, anchor: Align2, text: &str
     painter.text(pos, anchor, text, fid, NIXIE)
 }
 
-/// Логотип «Осциллограф»: «A» — всплеск на линии сигнала, перекладина — короткая волна. Координаты как в
-/// design/logo.svg (64×64). `tile` — плашка-экран с сеткой (крупные места); без неё — только линия (рамка окна).
-/// `lit` = false — приглушённый (неактивное окно).
-pub fn logo(painter: &egui::Painter, rect: Rect, tile: bool, lit: bool) {
+/// Логотип «Осциллограф»: «A» — всплеск на линии сигнала, перекладина — короткая волна. Без фона (минимализм).
+/// Координаты как в design/logo.svg (64×64). `lit` = false — приглушённый (неактивное окно).
+pub fn logo(painter: &egui::Painter, rect: Rect, lit: bool) {
     let s = rect.width() / 64.0;
     let p = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    if tile {
-        let r = Rect::from_min_max(p(2.0, 2.0), p(62.0, 62.0));
-        let round = CornerRadius::same((14.0 * s).round().min(255.0) as u8);
-        painter.rect_filled(r, round, GLASS);
-        // тёплое пятно в центре экрана (как радиальный градиент в svg)
-        painter.circle_filled(p(32.0, 36.0), 22.0 * s, Color32::from_rgba_unmultiplied(0x3A, 0x26, 0x14, 70));
-        painter.circle_filled(p(32.0, 36.0), 14.0 * s, Color32::from_rgba_unmultiplied(0x3A, 0x26, 0x14, 70));
-        let grid = Stroke::new((0.7 * s).max(1.0), Color32::from_rgb(0x2E, 0x24, 0x19));
-        for i in 0..5 {
-            let k = 14.0 + 10.0 * i as f32;
-            painter.hline((6.0 * s + rect.left())..=(58.0 * s + rect.left()), rect.top() + k * s, grid);
-            painter.vline(rect.left() + (k - 2.0) * s, (6.0 * s + rect.top())..=(58.0 * s + rect.top()), grid);
-        }
-        painter.rect_stroke(r, round, Stroke::new((1.0 * s).max(1.0), BRASS), StrokeKind::Inside);
-    }
     let trace = vec![p(7.0, 46.0), p(18.0, 46.0), p(32.0, 13.0), p(46.0, 46.0), p(57.0, 46.0)];
     let wave = vec![p(25.5, 34.0), p(29.5, 34.0), p(31.0, 31.0), p(33.0, 37.0), p(34.5, 34.0), p(37.5, 34.0)];
     let core = (3.2 * s).max(1.7);
@@ -237,7 +221,7 @@ pub fn logo(painter: &egui::Painter, rect: Rect, tile: bool, lit: bool) {
     let color = if lit { NIXIE } else { NIXIE.gamma_multiply(0.45) };
     painter.add(Shape::line(trace, Stroke::new(core, color)));
     painter.add(Shape::line(wave, Stroke::new(core, color)));
-    if lit && tile {
+    if lit && s > 1.0 {
         painter.circle_filled(p(32.0, 13.0), 1.2 * s, FILAMENT);
     }
 }
@@ -246,15 +230,10 @@ pub fn logo(painter: &egui::Painter, rect: Rect, tile: bool, lit: bool) {
 pub fn wordmark(ui: &mut Ui, logo_size: f32, text_size: f32) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(logo_size), Sense::hover());
-        logo(ui.painter(), rect, true, true);
+        logo(ui.painter(), rect, true);
         ui.add_space(2.0);
         ui.label(egui::RichText::new("Amadeus").font(xbold(text_size)).color(PAPER));
     });
-}
-
-/// Только надпись «Amadeus» (угол сайдбара: значок уже есть в рамке окна).
-pub fn wordmark_text(ui: &mut Ui, text_size: f32) {
-    ui.label(egui::RichText::new("Amadeus").font(xbold(text_size)).color(PAPER));
 }
 
 /// Переключатель как в макете (янтарь = вкл).
