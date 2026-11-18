@@ -51,6 +51,14 @@ logging:
 keys:
   ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
 EOF
+# Вебхуки (кто вошёл/вышел) → бэкенд; подпись — тем же ключом API.
+if [ -n "${LK_WEBHOOK_URL:-}" ]; then cat >> generated/livekit.yaml <<EOF
+webhook:
+  api_key: ${LIVEKIT_API_KEY}
+  urls:
+    - ${LK_WEBHOOK_URL}
+EOF
+fi
 
 # ── Caddy (layer4): TLS по SNI ──
 # Если перед Caddy стоит SNI-прокси с PROXY protocol (nginx stream) — заголовок разбирается (только с loopback).
