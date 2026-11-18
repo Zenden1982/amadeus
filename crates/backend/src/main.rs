@@ -117,12 +117,21 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     let pool = backend::connect(&cfg.database_url)
         .await
         .context("открыть базу")?;
-    let state = AppState::new(pool, cfg.livekit.clone(), cfg.trusted_proxy_hops);
-    let app = backend::router(state);
+    std::fs::create_dir_all(&cfg.uploads_dir)
+        .with_context(|| format!("создать папку вложений {}", cfg.uploads_dir.display()))?;
+    let state = AppState::new(
+        pool,
+        cfg.livekit.clone(),
+        cfg.trusted_proxy_hops,
+        cfg.uploads_dir.clone(),
+    );
+    backend::chat::spawn_janitor(state.clone());
+    let app = backend::router(state.clone());
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     tracing::info!(
         addr = %cfg.bind_addr,
         proxy_hops = cfg.trusted_proxy_hops,
+        uploads = %cfg.uploads_dir.display(),
         proxy_protocol = cfg.proxy_protocol,
         "listening"
     );
@@ -130,17 +139,17 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     if cfg.proxy_protocol {
         let listener = ProxyProtocolListener::new(listener, Duration::from_secs(5))?;
         axum::serve(listener, svc)
-            .with_graceful_shutdown(shutdown())
+            .with_graceful_shutdown(shutdown(state))
             .await?;
     } else {
         axum::serve(listener, svc)
-            .with_graceful_shutdown(shutdown())
+            .with_graceful_shutdown(shutdown(state))
             .await?;
     }
     Ok(())
 }
 
-async fn shutdown() {
+async fn shutdown(state: AppState) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -155,4 +164,5 @@ async fn shutdown() {
     let term = std::future::pending::<()>();
     tokio::select! { _ = ctrl_c => {}, _ = term => {} }
     tracing::info!("shutting down");
+    state.close_streams();
 }

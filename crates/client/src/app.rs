@@ -14,6 +14,7 @@ use egui_phosphor::regular as ph;
 use proto::{AuthResponse, Channel, ChannelKind, Invite, User};
 
 use crate::api::{self, Api, ApiError, ApiResult};
+use crate::chat::Chat;
 use crate::config::Settings;
 use crate::mictest::{self, MicTest};
 use crate::picker::{self, Picker};
@@ -40,6 +41,13 @@ enum Screen {
     Boot,
     Login,
     Main,
+}
+
+/// Что в центре окна: голосовой канал (сцена) или текстовый канал (чат). Голос при этом не прерывается.
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum View {
+    Voice,
+    Text(i64),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -108,11 +116,15 @@ pub struct App {
     views_frame: HashMap<String, (u32, u32)>,
     /// «Смотреть» нажато, движок ещё не подтвердил (фокус не сбрасывать).
     watch_pending: Option<(String, Instant)>,
+    /// Текстовый чат.
+    chat: Chat,
+    view: View,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime) -> Self {
         t::install(&cc.egui_ctx);
+        crate::frame::style_native_window(cc);
         let ctx = cc.egui_ctx.clone();
         let settings = Settings::load();
         let api = Api::new(&settings.server_url, settings.session_token.clone());
@@ -132,6 +144,7 @@ impl App {
             stream_volumes: settings.stream_volume.clone(),
         };
         let video = VideoHub::new(&ctx);
+        let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
         let voice = voice::spawn(rt.handle(), api.clone(), prefs, video.clone(), repaint.clone());
         let (ptt_tx, ptt_rx) = std_mpsc::channel();
         let ptt = Ptt::start(settings.ptt_key, settings.ptt_enabled, voice.sender(), ptt_tx, repaint);
@@ -185,6 +198,8 @@ impl App {
             pointer_moved_at: Instant::now(),
             views_frame: HashMap::new(),
             watch_pending: None,
+            chat,
+            view: View::Voice,
         };
         if has_token {
             app.fetch_me();
@@ -226,6 +241,8 @@ impl App {
 
     fn set_api(&mut self, api: Api) {
         self.api = api.clone();
+        self.chat.set_api(api.clone());
+        self.view = View::Voice;
         self.voice.send(Cmd::SetApi(api));
     }
 
@@ -273,6 +290,18 @@ impl App {
                         && let Some(ch) = list.iter().find(|c| c.id == id)
                     {
                         self.voice.send(Cmd::Join(ch.clone()));
+                    }
+                    // Отладка: AMADEUS_OPEN_TEXT=<id канала> — сразу открыть текстовый канал.
+                    #[cfg(debug_assertions)]
+                    if self.channels.is_empty()
+                        && let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok())
+                    {
+                        self.view = View::Text(id);
+                    }
+                    if let View::Text(id) = self.view
+                        && !list.iter().any(|c| c.id == id && c.kind == ChannelKind::Text)
+                    {
+                        self.view = View::Voice;
                     }
                     self.channels = list;
                     self.channels_error = None;
@@ -579,6 +608,7 @@ impl App {
         self.debug_autostream(&vs);
         #[cfg(debug_assertions)]
         self.debug_autowatch(ui, &vs);
+        self.chat.ensure_stream();
         self.sync_focus(ui, &vs);
         if self.fullscreen {
             self.ui_fullscreen(ui, &vs);
@@ -588,9 +618,23 @@ impl App {
         self.ui_sidebar(ui, &vs);
         self.ui_header(ui, &vs);
         self.ui_dock(ui, &vs);
-        egui::CentralPanel::no_frame().frame(Frame::new().fill(t::GLASS).inner_margin(Margin::same(28))).show(ui, |ui| {
-            self.ui_stage(ui, &vs);
-        });
+        let text_channel = match self.view {
+            View::Text(id) => self.channels.iter().find(|c| c.id == id).cloned(),
+            View::Voice => None,
+        };
+        match text_channel {
+            Some(ch) => {
+                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some();
+                egui::CentralPanel::no_frame().frame(Frame::new().fill(t::GLASS)).show(ui, |ui| {
+                    self.chat.ui(ui, &ch, modal);
+                });
+            }
+            None => {
+                egui::CentralPanel::no_frame().frame(Frame::new().fill(t::GLASS).inner_margin(Margin::same(28))).show(ui, |ui| {
+                    self.ui_stage(ui, &vs);
+                });
+            }
+        }
         self.ui_banner(ui, &vs);
         self.ui_volume_popup(ui, &vs);
         if self.settings_open {
@@ -763,8 +807,12 @@ impl App {
         for ch in voice {
             let active = vs.channel.as_ref().is_some_and(|c| c.id == ch.id);
             let count = if active && vs.conn == Conn::Connected { Some(vs.peers.len()) } else { None };
-            if channel_row(ui, ph::SPEAKER_HIGH, &ch.name, active, count, true).clicked() && !(active && vs.conn == Conn::Connected) {
-                self.voice.send(Cmd::Join(ch.clone()));
+            if channel_row(ui, ph::SPEAKER_HIGH, &ch.name, active, count, true).clicked() {
+                // уже в этом канале — просто вернуться к сцене (из чата)
+                if !(active && vs.conn == Conn::Connected) {
+                    self.voice.send(Cmd::Join(ch.clone()));
+                }
+                self.view = View::Voice;
             }
             if active {
                 for p in &vs.peers {
@@ -777,7 +825,10 @@ impl App {
             ui.add_space(6.0);
             group_label(ui, "Текстовые каналы");
             for ch in text {
-                channel_row(ui, ph::HASH, &ch.name, false, None, false).on_hover_text("Текстовые каналы появятся в следующих версиях");
+                let open = self.view == View::Text(ch.id);
+                if channel_row(ui, ph::HASH, &ch.name, open, None, true).clicked() {
+                    self.view = View::Text(ch.id);
+                }
             }
         }
     }
@@ -826,8 +877,16 @@ impl App {
             .show(ui, |ui| {
                 let r = ui.max_rect();
                 ui.painter().hline(r.x_range().expand(24.0), r.bottom(), Stroke::new(1.0, t::BRASS_DIM));
+                let text_ch = match self.view {
+                    View::Text(id) => self.channels.iter().find(|c| c.id == id).map(|c| c.name.clone()),
+                    View::Voice => None,
+                };
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;
+                    if let Some(name) = text_ch {
+                        ui.label(RichText::new(ph::HASH).size(20.0).color(t::DUST));
+                        ui.label(RichText::new(name).font(t::xbold(18.0)));
+                    } else {
                     match &vs.channel {
                         Some(ch) => {
                             ui.label(RichText::new(ph::SPEAKER_HIGH).size(20.0).color(t::DUST));
@@ -843,6 +902,7 @@ impl App {
                         None => {
                             ui.label(RichText::new("Не в канале").font(t::xbold(18.0)).color(t::DUST));
                         }
+                    }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(rtt) = vs.rtt {
@@ -1189,7 +1249,7 @@ impl App {
         if self.fullscreen && self.focus.is_none() {
             self.set_fullscreen(&ctx, false);
         }
-        let modal_open = self.settings_open || self.picker.is_some() || self.popup.is_some();
+        let modal_open = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.view != View::Voice;
         let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 && !modal_open {
             if self.fullscreen {
@@ -1623,10 +1683,21 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_msgs();
+        self.chat.poll();
+        if self.screen == Screen::Main && self.chat.unauthorized() {
+            self.logout();
+        }
+        // В полноэкранном просмотре трансляции рамки нет.
+        if !self.fullscreen {
+            crate::frame::title_bar(ui);
+        }
         match self.screen {
             Screen::Boot => self.ui_boot(ui),
             Screen::Login => self.ui_login(ui),
             Screen::Main => self.ui_main(ui),
+        }
+        if !self.fullscreen {
+            crate::frame::resize_edges(ui.ctx());
         }
     }
 

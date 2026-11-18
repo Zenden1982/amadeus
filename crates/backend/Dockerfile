@@ -26,6 +26,7 @@ COPY --from=build /src/target/release/backend /usr/local/bin/backend
 USER app
 WORKDIR /data
 ENV DATABASE_URL=sqlite:///data/app.db \
+    UPLOADS_DIR=/data/uploads \
     BIND_ADDR=0.0.0.0:8080 \
     RUST_LOG=info
 VOLUME /data

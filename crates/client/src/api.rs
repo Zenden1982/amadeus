@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use proto::{
-    AuthResponse, Channel, CreateInviteRequest, ErrorBody, Invite, JoinResponse, LoginRequest,
-    RegisterRequest, User,
+    Attachment, AuthResponse, Channel, CreateInviteRequest, ErrorBody, Invite, JoinResponse, LoginRequest, Message,
+    RegisterRequest, SendMessageRequest, User,
 };
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -15,6 +15,8 @@ pub struct ApiError {
     /// Машинный код (`bad_credentials`, `name_taken`, …) или `network`.
     pub code: String,
     pub message: String,
+    /// Исходный текст сервера (для `validation` — что именно не так).
+    pub detail: String,
 }
 
 impl ApiError {
@@ -26,7 +28,7 @@ impl ApiError {
         } else {
             format!("Ошибка сети: {e}")
         };
-        Self { code: "network".into(), message }
+        Self { code: "network".into(), message, detail: String::new() }
     }
 
     pub fn is_unauthorized(&self) -> bool {
@@ -62,15 +64,22 @@ fn humanize(status: StatusCode, body: Option<ErrorBody>) -> ApiError {
         _ if server_msg.is_empty() => format!("Ошибка сервера ({status})."),
         _ => format!("Ошибка сервера: {server_msg}"),
     };
-    ApiError { code, message }
+    ApiError { code, message, detail: server_msg }
 }
 
 #[derive(Clone)]
 pub struct Api {
     http: reqwest::Client,
+    /// Для долгих ответов (поток событий): без общего таймаута, но с таймаутом чтения.
+    stream_http: reqwest::Client,
     base: String,
     token: Option<String>,
 }
+
+/// Поток событий SSE: сервер шлёт пинг каждые 15 с — тишина дольше значит обрыв.
+const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(40);
+/// Загрузка картинки (до 8 МБ на медленном канале).
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl std::fmt::Debug for Api {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,28 +95,50 @@ impl Api {
             .user_agent(concat!("Amadeus/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client");
-        Self { http, base: base.trim_end_matches('/').to_string(), token }
+        let stream_http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .read_timeout(STREAM_READ_TIMEOUT)
+            .user_agent(concat!("Amadeus/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("reqwest client");
+        Self { http, stream_http, base: base.trim_end_matches('/').to_string(), token }
     }
 
     pub fn with_token(&self, token: Option<String>) -> Self {
-        Self { http: self.http.clone(), base: self.base.clone(), token }
+        Self { http: self.http.clone(), stream_http: self.stream_http.clone(), base: self.base.clone(), token }
+    }
+
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
+    }
+
+    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        let req = self.http.request(method, format!("{}{}", self.base, path));
+        match &self.token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
     }
 
     async fn call<B: Serialize, T: DeserializeOwned>(&self, method: Method, path: &str, body: Option<&B>) -> ApiResult<T> {
-        let mut req = self.http.request(method, format!("{}{}", self.base, path));
-        if let Some(t) = &self.token {
-            req = req.bearer_auth(t);
-        }
+        let mut req = self.request(method, path);
         if let Some(b) = body {
             req = req.json(b);
         }
-        let resp = req.send().await.map_err(ApiError::network)?;
+        Self::decode(req.send().await.map_err(ApiError::network)?).await
+    }
+
+    async fn decode<T: DeserializeOwned>(resp: reqwest::Response) -> ApiResult<T> {
         let status = resp.status();
+        let bad = |e: &dyn std::fmt::Display| ApiError {
+            code: "decode".into(),
+            message: format!("Непонятный ответ сервера: {e}"),
+            detail: String::new(),
+        };
         if status == StatusCode::NO_CONTENT {
-            serde_json::from_value(serde_json::Value::Null)
-                .map_err(|e| ApiError { code: "decode".into(), message: format!("Непонятный ответ сервера: {e}") })
+            serde_json::from_value(serde_json::Value::Null).map_err(|e| bad(&e))
         } else if status.is_success() {
-            resp.json::<T>().await.map_err(|e| ApiError { code: "decode".into(), message: format!("Непонятный ответ сервера: {e}") })
+            resp.json::<T>().await.map_err(|e| bad(&e))
         } else {
             let body = resp.json::<ErrorBody>().await.ok();
             Err(humanize(status, body))
@@ -142,6 +173,60 @@ impl Api {
 
     pub async fn create_invite(&self) -> ApiResult<Invite> {
         self.call(Method::POST, "/invites", Some(&CreateInviteRequest::default())).await
+    }
+
+    /// Страница истории (по возрастанию id): последние, старше `before` или новее `after`.
+    pub async fn messages(&self, channel_id: i64, before: Option<i64>, after: Option<i64>) -> ApiResult<Vec<Message>> {
+        let mut path = format!("/channels/{channel_id}/messages?limit={}", proto::limits::HISTORY_PAGE);
+        if let Some(b) = before {
+            path.push_str(&format!("&before={b}"));
+        }
+        if let Some(a) = after {
+            path.push_str(&format!("&after={a}"));
+        }
+        self.call::<(), _>(Method::GET, &path, None).await
+    }
+
+    pub async fn send_message(&self, channel_id: i64, req: &SendMessageRequest) -> ApiResult<Message> {
+        self.call(Method::POST, &format!("/channels/{channel_id}/messages"), Some(req)).await
+    }
+
+    /// Загрузить картинку (тело — файл как есть). Id вложения указывается при отправке сообщения.
+    pub async fn upload(&self, bytes: Vec<u8>) -> ApiResult<Attachment> {
+        let req = self
+            .request(Method::POST, "/uploads")
+            .timeout(UPLOAD_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes);
+        Self::decode(req.send().await.map_err(ApiError::network)?).await
+    }
+
+    /// Файл вложения.
+    pub async fn attachment(&self, id: i64) -> ApiResult<Vec<u8>> {
+        let resp = self.request(Method::GET, &format!("/attachments/{id}")).send().await.map_err(ApiError::network)?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(humanize(status, resp.json::<ErrorBody>().await.ok()));
+        }
+        Ok(resp.bytes().await.map_err(ApiError::network)?.to_vec())
+    }
+
+    /// Открыть поток событий `GET /events` (SSE). Данные читать `Response::chunk()`.
+    pub async fn events(&self) -> ApiResult<reqwest::Response> {
+        let mut req = self
+            .stream_http
+            .get(format!("{}/events", self.base))
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.map_err(ApiError::network)?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(resp)
+        } else {
+            Err(humanize(status, resp.json::<ErrorBody>().await.ok()))
+        }
     }
 }
 

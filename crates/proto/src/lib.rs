@@ -15,6 +15,17 @@ pub mod limits {
     pub const PASSWORD_MAX: usize = 128;
     pub const CHANNEL_NAME_MAX: usize = 64;
     pub const INVITE_USES_MAX: u32 = 100;
+    /// Текст сообщения, символов.
+    pub const MESSAGE_MAX: usize = 4000;
+    /// Вложений в одном сообщении.
+    pub const ATTACHMENTS_MAX: usize = 4;
+    /// Размер одной картинки, байт.
+    pub const IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+    /// Сторона картинки, пикселей.
+    pub const IMAGE_MAX_SIDE: u32 = 16_384;
+    /// Сообщений в одной странице истории (по умолчанию / максимум).
+    pub const HISTORY_PAGE: u32 = 50;
+    pub const HISTORY_PAGE_MAX: u32 = 100;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +129,62 @@ pub struct Invite {
     pub created_by: i64,
 }
 
+/// Автор сообщения (минимум, чтобы нарисовать строку).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Author {
+    pub id: i64,
+    pub name: String,
+}
+
+/// Вложение (пока только картинки). Файл — `GET /attachments/{id}` с авторизацией.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: i64,
+    /// `image/png`, `image/jpeg`, `image/gif`, `image/webp`.
+    pub mime: String,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Сообщение текстового канала. Время — unix-секунды.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    pub id: i64,
+    pub channel_id: i64,
+    pub author: Author,
+    pub content: String,
+    pub created_at: i64,
+    /// Задел на правку (чат, вариант B): когда сообщение правили.
+    #[serde(default)]
+    pub edited_at: Option<i64>,
+    /// Задел на ответы (вариант B): id сообщения, на которое отвечают.
+    #[serde(default)]
+    pub reply_to: Option<i64>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// `POST /channels/{id}/messages`. Вложения сначала загружаются через `POST /uploads`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SendMessageRequest {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<i64>,
+}
+
+/// Событие потока `GET /events` (SSE, поле `data` — этот JSON). Незнакомые `type` клиент пропускает.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerEvent {
+    /// Поток открыт. После переподключения клиент дозапрашивает пропущенное (`?after=`).
+    Hello,
+    /// Сервер не успел доставить часть событий — перечитать открытые каналы.
+    Resync,
+    MessageCreated { message: Message },
+}
+
 /// Тело любого ответа с ошибкой.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
@@ -143,6 +210,18 @@ mod tests {
         assert!(s.contains(r#""kind":"voice""#), "{s}");
         assert_eq!(ChannelKind::parse("text"), Some(ChannelKind::Text));
         assert_eq!(ChannelKind::parse("x"), None);
+    }
+
+    #[test]
+    fn server_event_tagged() {
+        let s = serde_json::to_string(&ServerEvent::Hello).unwrap();
+        assert_eq!(s, r#"{"type":"hello"}"#);
+        let e: ServerEvent = serde_json::from_str(
+            r#"{"type":"message_created","message":{"id":1,"channel_id":2,"author":{"id":3,"name":"a"},"content":"hi","created_at":5}}"#,
+        )
+        .unwrap();
+        assert!(matches!(e, ServerEvent::MessageCreated { message } if message.attachments.is_empty()));
+        assert!(serde_json::from_str::<ServerEvent>(r#"{"type":"future_thing"}"#).is_err());
     }
 
     #[test]

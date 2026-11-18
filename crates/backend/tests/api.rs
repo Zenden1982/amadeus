@@ -10,7 +10,9 @@ use axum::{
 use backend::{AppState, config::LiveKitConfig, ratelimit::RateLimiter};
 use http_body_util::BodyExt;
 use livekit_api::access_token::TokenVerifier;
-use proto::{AuthResponse, Channel, ErrorBody, Invite, JoinResponse, User};
+use proto::{
+    Attachment, AuthResponse, Channel, ErrorBody, Invite, JoinResponse, Message, ServerEvent, User,
+};
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tower::ServiceExt;
@@ -22,6 +24,8 @@ const LK_URL: &str = "wss://lk.example.test";
 struct T {
     app: Router,
     pool: sqlx::SqlitePool,
+    state: AppState,
+    uploads: std::path::PathBuf,
 }
 
 async fn setup_with_limit(limit: u32) -> T {
@@ -38,15 +42,30 @@ async fn setup_with_limit(limit: u32) -> T {
         api_key: LK_KEY.into(),
         api_secret: LK_SECRET.into(),
     };
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let uploads = std::env::temp_dir().join(format!(
+        "amadeus-test-uploads-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let state = AppState::with_limiter(
         pool.clone(),
         lk,
         1,
         RateLimiter::new(limit, Duration::from_secs(300)),
+        uploads.clone(),
     );
     T {
-        app: backend::router(state),
+        app: backend::router(state.clone()),
         pool,
+        state,
+        uploads,
+    }
+}
+
+impl Drop for T {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.uploads);
     }
 }
 
@@ -97,6 +116,33 @@ impl T {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, v)
+    }
+
+    /// Сырое тело (загрузка файла). Возвращает статус, JSON (если есть) и заголовки.
+    async fn call_raw(
+        &self,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        body: Vec<u8>,
+    ) -> (StatusCode, Value, axum::http::HeaderMap, Vec<u8>) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-forwarded-for", "203.0.113.1");
+        if let Some(t) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let req = req
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+        let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, v, headers, bytes)
     }
 
     async fn admin(&self) -> String {
@@ -597,4 +643,391 @@ async fn backup_makes_consistent_copy() {
     copy.close().await;
     pool.close().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------------------------ чат
+
+/// Минимальный PNG: сигнатура + IHDR (размеры читаются из заголовка).
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+    v.extend_from_slice(&13u32.to_be_bytes());
+    v.extend_from_slice(b"IHDR");
+    v.extend_from_slice(&w.to_be_bytes());
+    v.extend_from_slice(&h.to_be_bytes());
+    v.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    v
+}
+
+struct Chat {
+    t: T,
+    admin: String,
+    user: String,
+    text: i64,
+    voice: i64,
+}
+
+async fn chat_setup() -> Chat {
+    let t = setup().await;
+    let admin = t.admin().await;
+    let inv = t.invite(&admin, json!({})).await;
+    let user: AuthResponse =
+        serde_json::from_value(t.register(&inv.code, "vasya").await.1).unwrap();
+    let mk = |name: &'static str, kind: &'static str| {
+        let t = &t;
+        let admin = admin.clone();
+        async move {
+            let (s, v) = t
+                .call(
+                    Method::POST,
+                    "/channels",
+                    Some(&admin),
+                    Some(json!({"name": name, "kind": kind})),
+                )
+                .await;
+            assert_eq!(s, StatusCode::CREATED);
+            serde_json::from_value::<Channel>(v).unwrap().id
+        }
+    };
+    let text = mk("чат", "text").await;
+    let voice = mk("Общий", "voice").await;
+    Chat {
+        t,
+        admin,
+        user: user.token,
+        text,
+        voice,
+    }
+}
+
+impl Chat {
+    async fn send(&self, tok: &str, ch: i64, body: Value) -> (StatusCode, Value) {
+        self.t
+            .call(
+                Method::POST,
+                &format!("/channels/{ch}/messages"),
+                Some(tok),
+                Some(body),
+            )
+            .await
+    }
+
+    async fn history(&self, tok: &str, ch: i64, q: &str) -> Vec<Message> {
+        let (s, v) = self
+            .t
+            .call(
+                Method::GET,
+                &format!("/channels/{ch}/messages{q}"),
+                Some(tok),
+                None,
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        serde_json::from_value(v).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn chat_send_and_history() {
+    let c = chat_setup().await;
+    for i in 0..7 {
+        let tok = if i % 2 == 0 { &c.user } else { &c.admin };
+        let (s, v) = c
+            .send(tok, c.text, json!({"content": format!("  msg {i}\n ")}))
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+        let m: Message = serde_json::from_value(v).unwrap();
+        assert_eq!(m.content, format!("msg {i}")); // пробелы по краям обрезаны
+        assert_eq!(m.channel_id, c.text);
+    }
+    let all = c.history(&c.user, c.text, "").await;
+    assert_eq!(all.len(), 7);
+    assert!(all.windows(2).all(|w| w[0].id < w[1].id), "по возрастанию");
+    assert_eq!(all[0].author.name, "vasya");
+    assert_eq!(all[1].author.name, "admin");
+
+    // страница «старше» — последние 3 перед all[5]
+    let page = c
+        .history(&c.user, c.text, &format!("?before={}&limit=3", all[5].id))
+        .await;
+    assert_eq!(
+        page.iter().map(|m| m.id).collect::<Vec<_>>(),
+        all[2..5].iter().map(|m| m.id).collect::<Vec<_>>()
+    );
+    // последние 2
+    let last = c.history(&c.user, c.text, "?limit=2").await;
+    assert_eq!(last[1].id, all[6].id);
+    assert_eq!(last.len(), 2);
+    // «новее» — дозапрос после переподключения
+    let newer = c
+        .history(&c.user, c.text, &format!("?after={}", all[4].id))
+        .await;
+    assert_eq!(newer.len(), 2);
+    assert_eq!(newer[0].id, all[5].id);
+    let (s, _) = c
+        .t
+        .call(
+            Method::GET,
+            &format!("/channels/{}/messages?before=1&after=1", c.text),
+            Some(&c.user),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = c
+        .t
+        .call(
+            Method::GET,
+            &format!("/channels/{}/messages?limit=abc", c.text),
+            Some(&c.user),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn chat_validation() {
+    let c = chat_setup().await;
+    let (s, v) = c.send(&c.user, c.text, json!({"content": "   "})).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let long = "я".repeat(proto::limits::MESSAGE_MAX + 1);
+    let (s, _) = c.send(&c.user, c.text, json!({ "content": long })).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let ok = "я".repeat(proto::limits::MESSAGE_MAX);
+    let (s, _) = c.send(&c.user, c.text, json!({ "content": ok })).await;
+    assert_eq!(s, StatusCode::CREATED);
+    // голосовой канал — не чат
+    let (s, _) = c.send(&c.user, c.voice, json!({"content": "x"})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = c
+        .t
+        .call(
+            Method::GET,
+            &format!("/channels/{}/messages", c.voice),
+            Some(&c.user),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = c.send(&c.user, 9999, json!({"content": "x"})).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // без входа
+    let (s, _) = c
+        .t
+        .call(
+            Method::GET,
+            &format!("/channels/{}/messages", c.text),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn chat_rate_limited() {
+    let c = chat_setup().await;
+    for _ in 0..backend::CHAT_MESSAGES {
+        assert_eq!(
+            c.send(&c.user, c.text, json!({"content": "spam"})).await.0,
+            StatusCode::CREATED
+        );
+    }
+    let (s, v) = c.send(&c.user, c.text, json!({"content": "spam"})).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(err(&v), "rate_limited");
+    // у другого пользователя свой лимит
+    assert_eq!(
+        c.send(&c.admin, c.text, json!({"content": "ok"})).await.0,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn chat_images() {
+    let c = chat_setup().await;
+    let (s, v, _, _) = c
+        .t
+        .call_raw(Method::POST, "/uploads", Some(&c.user), b"<svg></svg>".to_vec())
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let (s, _, _, _) = c
+        .t
+        .call_raw(Method::POST, "/uploads", None, png(10, 10))
+        .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _, _, _) = c
+        .t
+        .call_raw(Method::POST, "/uploads", Some(&c.user), png(20_000, 10))
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let mut big = png(10, 10);
+    big.resize(proto::limits::IMAGE_MAX_BYTES + 1, 0);
+    let (s, v, _, _) = c
+        .t
+        .call_raw(Method::POST, "/uploads", Some(&c.user), big)
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let mut too_big = png(10, 10);
+    too_big.resize(proto::limits::IMAGE_MAX_BYTES + 200 * 1024, 0);
+    let (s, v, _, _) = c
+        .t
+        .call_raw(Method::POST, "/uploads", Some(&c.user), too_big)
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+
+    let img = png(640, 480);
+    let (s, v, _, _) = c
+        .t
+        .call_raw(Method::POST, "/uploads", Some(&c.user), img.clone())
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let att: Attachment = serde_json::from_value(v).unwrap();
+    assert_eq!((att.width, att.height, att.mime.as_str()), (640, 480, "image/png"));
+
+    // неотправленную видит только загрузивший
+    let url = format!("/attachments/{}", att.id);
+    assert_eq!(
+        c.t.call_raw(Method::GET, &url, Some(&c.admin), vec![]).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        c.t.call_raw(Method::GET, &url, Some(&c.user), vec![]).await.0,
+        StatusCode::OK
+    );
+    // чужое вложение прикрепить нельзя (и сообщение не создаётся)
+    let (s, _) = c
+        .send(&c.admin, c.text, json!({"content": "x", "attachments": [att.id]}))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(c.history(&c.admin, c.text, "").await.is_empty());
+
+    // только картинка, без текста
+    let (s, v) = c
+        .send(&c.user, c.text, json!({"attachments": [att.id, att.id]}))
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let m: Message = serde_json::from_value(v).unwrap();
+    assert_eq!(m.attachments, vec![att.clone()]);
+    assert_eq!(c.history(&c.admin, c.text, "").await[0].attachments, vec![att.clone()]);
+    // повторно — уже отправлено
+    let (s, _) = c
+        .send(&c.user, c.text, json!({"attachments": [att.id]}))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // теперь видят все, с правильным типом
+    let (s, _, h, body) = c.t.call_raw(Method::GET, &url, Some(&c.admin), vec![]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h[header::CONTENT_TYPE], "image/png");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert_eq!(body, img);
+    assert_eq!(
+        c.t.call_raw(Method::GET, &url, None, vec![]).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let files = || std::fs::read_dir(&c.t.uploads).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(files(), 1);
+
+    // удаление канала уносит и файлы
+    let (s, _) = c
+        .t
+        .call(
+            Method::DELETE,
+            &format!("/channels/{}", c.text),
+            Some(&c.admin),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(files(), 0);
+    assert_eq!(
+        c.t.call_raw(Method::GET, &url, Some(&c.admin), vec![]).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn stale_uploads_cleaned() {
+    let c = chat_setup().await;
+    let (s, v, _, _) = c
+        .t
+        .call_raw(Method::POST, "/uploads", Some(&c.user), png(4, 4))
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let att: Attachment = serde_json::from_value(v).unwrap();
+    assert_eq!(backend::chat::cleanup_pending(&c.t.state).await.unwrap(), 0);
+    sqlx::query("UPDATE attachments SET created_at = 1")
+        .execute(&c.t.pool)
+        .await
+        .unwrap();
+    assert_eq!(backend::chat::cleanup_pending(&c.t.state).await.unwrap(), 1);
+    let (s, _) = c
+        .send(&c.user, c.text, json!({"attachments": [att.id]}))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// Читает из SSE-потока следующее событие с данными (пропуская комментарии keep-alive).
+async fn next_event(body: &mut Body, buf: &mut String) -> ServerEvent {
+    loop {
+        if let Some(end) = buf.find("\n\n") {
+            let block: String = buf.drain(..end + 2).collect();
+            if let Some(data) = block.lines().find_map(|l| l.strip_prefix("data:")) {
+                return serde_json::from_str(data.trim()).unwrap();
+            }
+            continue;
+        }
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("событие не пришло")
+            .expect("поток закрыт")
+            .unwrap();
+        if let Ok(data) = frame.into_data() {
+            buf.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+}
+
+#[tokio::test]
+async fn events_stream() {
+    let c = chat_setup().await;
+    let unauth = Request::builder().uri("/events").body(Body::empty()).unwrap();
+    assert_eq!(
+        c.t.app.clone().oneshot(unauth).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let req = Request::builder()
+        .uri("/events")
+        .header(header::AUTHORIZATION, format!("Bearer {}", c.admin))
+        .body(Body::empty())
+        .unwrap();
+    let resp = c.t.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(resp.headers()["x-accel-buffering"], "no");
+    let mut body = resp.into_body();
+    let mut buf = String::new();
+    assert_eq!(next_event(&mut body, &mut buf).await, ServerEvent::Hello);
+
+    let (s, v) = c.send(&c.user, c.text, json!({"content": "привет"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let sent: Message = serde_json::from_value(v).unwrap();
+    match next_event(&mut body, &mut buf).await {
+        ServerEvent::MessageCreated { message } => assert_eq!(message, sent),
+        e => panic!("ожидали message_created, пришло {e:?}"),
+    }
+
+    // остановка сервиса закрывает поток
+    c.t.state.close_streams();
+    let end = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match body.frame().await {
+                None => break,
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => panic!("{e}"),
+            }
+        }
+    })
+    .await;
+    assert!(end.is_ok(), "поток не закрылся");
 }

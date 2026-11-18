@@ -44,7 +44,10 @@ PROXY protocol от прокси принимается (только с 127.0.0
 
 ## Бэкенд отдельно (за своим reverse proxy)
 `COMPOSE_PROFILES=backend`, `CADDY_SERVE_API=0`, `BACKEND_BIND=0.0.0.0:8080` (или адрес, доступный прокси),
-`TRUSTED_PROXY_HOPS=1`; в прокси — `api.` → этот адрес (WebSocket включить). Прокси должен дописывать
+`TRUSTED_PROXY_HOPS=1`; в прокси — `api.` → этот адрес. Поток событий чата (`GET /events`) — обычный HTTP (SSE):
+WebSocket не нужен, буферизацию nginx бэкенд отключает сам заголовком `X-Accel-Buffering: no`; таймаут чтения прокси
+должен быть больше 15 с (у nginx по умолчанию 60 с). Лимит тела запроса в прокси — не меньше 9 МБ (картинки до 8 МБ;
+у nginx по умолчанию 1 МБ — `client_max_body_size 10m`). Прокси должен дописывать
 `X-Forwarded-For` с настоящим IP клиента (иначе rate limit будет общим на всех).
 
 ## Бэкенд: первый запуск
@@ -54,7 +57,8 @@ docker compose run --rm -it backend create-admin --name <ник>     # паро�
 docker compose run --rm backend create-invite --uses 1 --hours 168 # инвайт-код для друга
 ```
 Остальное (каналы, инвайты, отзыв) — через API от имени админа (позже — из клиента).
-База — SQLite в `/data/app.db` (том `backend-data` или папка хоста `BACKEND_DATA`).
+База — SQLite в `/data/app.db`, картинки чата — `/data/uploads` (том `backend-data` или папка хоста `BACKEND_DATA`).
+Резервная копия базы не включает картинки — копировать папку `uploads` отдельно.
 Резервная копия на ходу (согласованный снимок через `VACUUM INTO`, контейнер не останавливать):
 ```sh
 docker compose exec -T backend backend backup /data/backup/app.db   # файл появится в томе/папке данных
@@ -72,6 +76,11 @@ docker compose exec -T backend backend backup /data/backup/app.db   # файл �
 | POST | `/channels/{id}/join` | пользователь | `{livekit_url, livekit_token, room}` (токен на 6 ч) |
 | GET / POST | `/invites` | админ | список / создать `{uses?, expires_in_hours?}` (по умолчанию 1 раз, 7 дней; 0 ч — бессрочно) |
 | DELETE | `/invites/{code}` | админ | отозвать |
+| GET | `/channels/{id}/messages?before=&after=&limit=` | пользователь | история текстового канала (по возрастанию id; без параметров — последние 50) |
+| POST | `/channels/{id}/messages` | пользователь | `{content, attachments: [id]}` → сообщение (20 сообщений / 10 с) |
+| POST | `/uploads` | пользователь | тело — картинка PNG/JPEG/GIF/WebP до 8 МБ → `{id, mime, size, width, height}` |
+| GET | `/attachments/{id}` | пользователь | файл вложения |
+| GET | `/events` | пользователь | поток событий (SSE): `hello`, `message_created`, `resync`; пинг каждые 15 с |
 
 Rate limit: 10 попыток входа/регистрации за 5 минут с одного IP (ответ 429 + `Retry-After`).
 

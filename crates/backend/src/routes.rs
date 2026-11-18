@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     routing::{delete, get, post},
 };
@@ -12,7 +12,7 @@ use proto::{
 use tower_http::trace::TraceLayer;
 
 use crate::{
-    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL,
+    AppState, LIVEKIT_TOKEN_TTL, SESSION_TTL, chat,
     db::{self, ChannelRow, InviteRow},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
@@ -31,6 +31,16 @@ pub fn router(state: AppState) -> Router {
         .route("/channels/{id}/join", post(join_channel))
         .route("/invites", get(list_invites).post(create_invite))
         .route("/invites/{code}", delete(revoke_invite))
+        .route(
+            "/channels/{id}/messages",
+            get(chat::list_messages).post(chat::send_message),
+        )
+        .route(
+            "/uploads",
+            post(chat::upload).layer(DefaultBodyLimit::max(limits::IMAGE_MAX_BYTES + 64 * 1024)),
+        )
+        .route("/attachments/{id}", get(chat::get_attachment))
+        .route("/events", get(chat::events))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -208,6 +218,13 @@ async fn delete_channel(
     Path(id): Path<i64>,
 ) -> AppResult<StatusCode> {
     user.require_admin()?;
+    // файлы вложений канала удаляются вслед за строками (каскад в БД)
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT a.storage_key FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.channel_id = ?",
+    )
+    .bind(id)
+    .fetch_all(&state.inner.db)
+    .await?;
     let n = sqlx::query("DELETE FROM channels WHERE id = ?")
         .bind(id)
         .execute(&state.inner.db)
@@ -216,6 +233,7 @@ async fn delete_channel(
     if n == 0 {
         Err(AppError::NotFound)
     } else {
+        chat::remove_files(&state, &keys).await;
         Ok(StatusCode::NO_CONTENT)
     }
 }

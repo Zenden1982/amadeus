@@ -36,6 +36,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: sqlite:///data/app.db
+      UPLOADS_DIR: /data/uploads
       BIND_ADDR: 0.0.0.0:8080
       # Caddy (standalone) отдаёт API сырым TCP с заголовком PROXY v2 — бэкенд должен его ждать
       PROXY_PROTOCOL: ${CADDY_SERVE_API:-0}

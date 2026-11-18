@@ -11,6 +11,10 @@ pub struct Config {
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
     pub bind_addr: SocketAddr,
 
+    /// Папка для файлов вложений чата (картинки).
+    #[arg(long, env = "UPLOADS_DIR", default_value = "data/uploads")]
+    pub uploads_dir: std::path::PathBuf,
+
     #[command(flatten)]
     pub livekit: LiveKitConfig,
 

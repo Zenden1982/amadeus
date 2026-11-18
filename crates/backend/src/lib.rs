@@ -1,4 +1,4 @@
-//! Бэкенд Amadeus: аккаунты (только по инвайтам), каналы, выдача LiveKit-токенов.
+//! Бэкенд Amadeus: аккаунты (только по инвайтам), каналы, выдача LiveKit-токенов, чат.
 
 pub mod config;
 pub mod error;
@@ -6,13 +6,17 @@ pub mod proxy_protocol;
 pub mod ratelimit;
 pub mod security;
 
+pub mod chat;
 mod db;
 mod extract;
 
 pub use extract::ClientAddr;
 mod routes;
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
+
+use proto::ServerEvent;
+use tokio::sync::{broadcast, watch};
 
 pub use db::{backup, connect, create_invite, create_user};
 pub use routes::router;
@@ -27,6 +31,12 @@ pub const LIVEKIT_TOKEN_TTL: Duration = Duration::from_secs(6 * 3600);
 /// Лимит попыток входа/регистрации с одного IP.
 pub const AUTH_ATTEMPTS: u32 = 10;
 pub const AUTH_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Лимит сообщений на пользователя.
+pub const CHAT_MESSAGES: u32 = 20;
+pub const CHAT_WINDOW: Duration = Duration::from_secs(10);
+/// Лимит загрузок картинок на пользователя.
+pub const UPLOADS: u32 = 30;
+pub const UPLOADS_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,15 +48,29 @@ pub struct Inner {
     pub livekit: LiveKitConfig,
     pub trusted_proxy_hops: usize,
     pub auth_limiter: RateLimiter,
+    pub chat_limiter: RateLimiter<i64>,
+    pub upload_limiter: RateLimiter<i64>,
+    /// Где лежат файлы вложений.
+    pub uploads_dir: PathBuf,
+    /// События для `GET /events` (рассылка всем подключённым).
+    pub events: broadcast::Sender<ServerEvent>,
+    /// true — сервис останавливается: потоки SSE закрываются (иначе graceful shutdown ждал бы их вечно).
+    pub shutdown: watch::Sender<bool>,
 }
 
 impl AppState {
-    pub fn new(db: sqlx::SqlitePool, livekit: LiveKitConfig, trusted_proxy_hops: usize) -> Self {
+    pub fn new(
+        db: sqlx::SqlitePool,
+        livekit: LiveKitConfig,
+        trusted_proxy_hops: usize,
+        uploads_dir: PathBuf,
+    ) -> Self {
         Self::with_limiter(
             db,
             livekit,
             trusted_proxy_hops,
             RateLimiter::new(AUTH_ATTEMPTS, AUTH_WINDOW),
+            uploads_dir,
         )
     }
 
@@ -55,6 +79,7 @@ impl AppState {
         livekit: LiveKitConfig,
         trusted_proxy_hops: usize,
         auth_limiter: RateLimiter,
+        uploads_dir: PathBuf,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -62,8 +87,18 @@ impl AppState {
                 livekit,
                 trusted_proxy_hops,
                 auth_limiter,
+                chat_limiter: RateLimiter::new(CHAT_MESSAGES, CHAT_WINDOW),
+                upload_limiter: RateLimiter::new(UPLOADS, UPLOADS_WINDOW),
+                uploads_dir,
+                events: broadcast::channel(256).0,
+                shutdown: watch::channel(false).0,
             }),
         }
+    }
+
+    /// Закрыть потоки событий (перед остановкой сервиса).
+    pub fn close_streams(&self) {
+        self.inner.shutdown.send_replace(true);
     }
 }
 

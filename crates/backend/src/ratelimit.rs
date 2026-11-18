@@ -1,19 +1,20 @@
-//! Простой ограничитель попыток: фиксированное окно на ключ (IP клиента).
+//! Простой ограничитель попыток: фиксированное окно на ключ (IP клиента, id пользователя).
 
 use std::{
     collections::HashMap,
+    hash::Hash,
     net::IpAddr,
     sync::Mutex,
     time::{Duration, Instant},
 };
 
-pub struct RateLimiter {
+pub struct RateLimiter<K = IpAddr> {
     max: u32,
     window: Duration,
-    state: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+    state: Mutex<HashMap<K, (Instant, u32)>>,
 }
 
-impl RateLimiter {
+impl<K: Hash + Eq> RateLimiter<K> {
     pub fn new(max: u32, window: Duration) -> Self {
         Self {
             max,
@@ -23,16 +24,16 @@ impl RateLimiter {
     }
 
     /// Засчитать попытку. `Err(секунды до сброса)`, если лимит исчерпан.
-    pub fn check(&self, ip: IpAddr) -> Result<(), u64> {
-        self.check_at(ip, Instant::now())
+    pub fn check(&self, key: K) -> Result<(), u64> {
+        self.check_at(key, Instant::now())
     }
 
-    fn check_at(&self, ip: IpAddr, now: Instant) -> Result<(), u64> {
+    fn check_at(&self, key: K, now: Instant) -> Result<(), u64> {
         let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() > 10_000 {
             map.retain(|_, (start, _)| now.duration_since(*start) < self.window);
         }
-        let entry = map.entry(ip).or_insert((now, 0));
+        let entry = map.entry(key).or_insert((now, 0));
         if now.duration_since(entry.0) >= self.window {
             *entry = (now, 0);
         }
