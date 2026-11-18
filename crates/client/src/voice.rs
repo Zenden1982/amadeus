@@ -57,6 +57,10 @@ pub enum Cmd {
     Watch { identity: String, on: bool },
     /// Где видна трансляция: размер на экране (физические пиксели) для SFU; невидимая — на паузе.
     StreamView { identity: String, visible: bool, width: u32, height: u32 },
+    /// Отладочный оверлей F3 открыт/закрыт: открыт — метрики раз в 1 с в `VoiceState.metrics`.
+    Metrics(bool),
+    /// Вся сырая статистика WebRTC — в лог (один раз, на следующем опросе).
+    DumpStats,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +114,8 @@ pub struct VoiceState {
     pub stream_notice: Option<String>,
     /// Чьи трансляции мы смотрим (identity, по алфавиту).
     pub watching: Vec<String>,
+    /// Метрики для оверлея F3 (только пока он открыт и мы в канале).
+    pub metrics: Option<crate::metrics::Metrics>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +163,7 @@ impl Default for VoiceState {
             stream: None,
             stream_notice: None,
             watching: Vec::new(),
+            metrics: None,
         }
     }
 }
@@ -232,6 +239,11 @@ pub fn spawn(
         watching: HashSet::new(),
         receivers: HashMap::new(),
         views: HashMap::new(),
+        overlay: false,
+        counters: Default::default(),
+        metrics_at: None,
+        dump_stats: false,
+        force_relay: std::env::var("AMADEUS_FORCE_RELAY").is_ok_and(|v| v == "1"),
     };
     rt.spawn(engine.run(rx, cap_rx));
     VoiceHandle { tx, state }
@@ -273,6 +285,14 @@ struct Engine {
     receivers: HashMap<String, tokio::task::JoinHandle<()>>,
     /// Последний вид из UI: (видна, ширина, высота) — повторно применяется после переподписки.
     views: HashMap<String, (bool, u32, u32)>,
+    /// Оверлей F3 открыт.
+    overlay: bool,
+    counters: crate::metrics::Counters,
+    /// Время прошлого опроса для метрик (интервал для скоростей).
+    metrics_at: Option<Instant>,
+    dump_stats: bool,
+    /// `AMADEUS_FORCE_RELAY=1`: только через TURN (проверка запасного пути).
+    force_relay: bool,
 }
 
 /// Идущая трансляция. Захват и источник живут дольше публикации: при переподключении
@@ -509,6 +529,17 @@ impl Engine {
             }
             Cmd::StopStream => self.stop_stream().await,
             Cmd::DismissStreamNotice => self.set(|s| s.stream_notice = None),
+            Cmd::Metrics(on) => {
+                self.overlay = on;
+                self.counters = Default::default();
+                self.metrics_at = None;
+                // Сразу опросить на следующем тике.
+                self.last_stats = Instant::now() - STATS_EVERY;
+                if !on {
+                    self.set(|s| s.metrics = None);
+                }
+            }
+            Cmd::DumpStats => self.dump_stats = true,
             Cmd::Watch { identity, on } => self.set_watching(&identity, on),
             Cmd::StreamView { identity, visible, width, height } => {
                 self.views.insert(identity.clone(), (visible, width, height));
@@ -565,6 +596,10 @@ impl Engine {
         opts.auto_subscribe = false;
         opts.adaptive_stream = true;
         opts.dynacast = true;
+        if self.force_relay {
+            log::warn!("AMADEUS_FORCE_RELAY=1: подключение только через TURN");
+            opts.rtc_config.ice_transport_type = livekit::webrtc::prelude::IceTransportsType::Relay;
+        }
         let (room, events) = Room::connect(&join.livekit_url, &join.livekit_token, opts).await?;
 
         if self.audio.is_none() {
@@ -637,6 +672,9 @@ impl Engine {
                 log::warn!("закрытие комнаты: {e}");
             }
         self.last_peers.clear();
+        self.counters = Default::default();
+        self.metrics_at = None;
+        self.set(|s| s.metrics = None);
     }
 
     fn lost_connection(&mut self, why: &str) {
@@ -760,7 +798,8 @@ impl Engine {
             }
         if self.room.is_some() {
             self.refresh_peers(true);
-            if self.last_stats.elapsed() >= STATS_EVERY {
+            let every = if self.overlay { Duration::from_secs(1) } else { STATS_EVERY };
+            if self.last_stats.elapsed() >= every {
                 self.last_stats = Instant::now();
                 self.update_rtt().await;
             }
@@ -771,6 +810,28 @@ impl Engine {
         let Some((room, _)) = &self.room else { return };
         let Ok(stats) = room.get_stats().await else { return };
         self.stats_n += 1;
+        if self.dump_stats {
+            self.dump_stats = false;
+            log::info!("статистика WebRTC (publisher): {:#?}", stats.publisher_stats);
+            log::info!("статистика WebRTC (subscriber): {:#?}", stats.subscriber_stats);
+        }
+        if self.overlay {
+            let now = Instant::now();
+            let dt = self.metrics_at.map_or(1.0, |t| now.duration_since(t).as_secs_f64());
+            self.metrics_at = Some(now);
+            let all: Vec<RtcStats> = stats.publisher_stats.iter().chain(stats.subscriber_stats.iter()).cloned().collect();
+            let labels = self.track_labels();
+            let mut m = crate::metrics::collect(&all, &labels, &mut self.counters, dt, self.force_relay);
+            self.set(|s| {
+                // Pre-encoded: libwebrtc видит только «passthrough» — подставляем настоящий энкодер.
+                if let Some(info) = &s.stream {
+                    for r in m.rows.iter_mut().filter(|r| r.dir == crate::metrics::Dir::Out && r.kind == "video") {
+                        r.detail = r.detail.replacen("LiveKit pre-encoded passthrough", &info.backend, 1);
+                    }
+                }
+                s.metrics = Some(m);
+            });
+        }
         self.update_video_stats(&stats.publisher_stats);
         // Одна PeerConnection на всё (LiveKit 1.13) — входящие тоже в publisher_stats.
         self.log_inbound_video(&stats.subscriber_stats);
@@ -1257,6 +1318,39 @@ impl Engine {
     }
 
     /// Пересобирает список участников. `quiet` — из таймера (только уровни/говорит).
+    /// id rtc-трека → подпись для оверлея: «Имя: голос / экран / звук экрана», свои — «я: …».
+    fn track_labels(&self) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        let Some((room, _)) = &self.room else { return out };
+        let what = |s: TrackSource| match s {
+            TrackSource::Microphone => "голос",
+            TrackSource::Screenshare => "экран",
+            TrackSource::ScreenshareAudio => "звук экрана",
+            TrackSource::Camera => "камера",
+            _ => "?",
+        };
+        for publication in room.local_participant().track_publications().values() {
+            let id = match publication.track() {
+                Some(LocalTrack::Audio(a)) => a.rtc_track().id(),
+                Some(LocalTrack::Video(v)) => v.rtc_track().id(),
+                None => continue,
+            };
+            out.insert(id, format!("я: {}", what(publication.source())));
+        }
+        for p in room.remote_participants().values() {
+            let name = if p.name().is_empty() { p.identity().to_string() } else { p.name().to_string() };
+            for publication in p.track_publications().values() {
+                let id = match publication.track() {
+                    Some(RemoteTrack::Audio(a)) => a.rtc_track().id(),
+                    Some(RemoteTrack::Video(v)) => v.rtc_track().id(),
+                    None => continue,
+                };
+                out.insert(id, format!("{name}: {}", what(publication.source())));
+            }
+        }
+        out
+    }
+
     fn refresh_peers(&mut self, _quiet: bool) {
         let Some((room, _)) = &self.room else { return };
         let mut peers = Vec::new();
@@ -1281,9 +1375,11 @@ impl Engine {
                     .map(|t| t.is_muted())
                     .unwrap_or(true);
                 let streaming = p.track_publications().values().any(|t| t.source() == TrackSource::Screenshare);
+                // Без имени (боты `lk load-test`, сторонние клиенты) — показываем identity.
+                let name = Some(p.name()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.identity().as_str().to_string());
                 Peer {
                     identity: p.identity().as_str().to_string(),
-                    name: p.name(),
+                    name,
                     is_local: false,
                     speaking: p.is_speaking(),
                     level: p.audio_level(),

@@ -32,6 +32,8 @@ pub struct Conn {
     pub path: Path,
     /// Адрес удалённого кандидата (SFU или TURN), `ip:port`.
     pub remote: String,
+    /// Через какой TURN (url локального relay-кандидата), иначе пусто.
+    pub turn: String,
     pub rtt_ms: Option<f64>,
     /// Оценка доступного исходящего канала (кбит/с).
     pub out_kbps_avail: Option<f64>,
@@ -67,9 +69,9 @@ pub struct Metrics {
     pub forced_relay: bool,
 }
 
-/// Счётчики прошлого опроса по id статистики: (байты, пакетов принято, пакетов потеряно).
+/// Счётчики прошлого опроса по id статистики: (байты, пакетов принято, пакетов потеряно, кадров декодировано).
 #[derive(Debug, Default)]
-pub struct Counters(HashMap<String, (u64, u64, i64)>);
+pub struct Counters(HashMap<String, (u64, u64, i64, u64)>);
 
 /// `labels`: id rtc-трека (`track_identifier`) → подпись («Вася: голос», «я: микрофон»).
 pub fn collect(stats: &[RtcStats], labels: &HashMap<String, String>, prev: &mut Counters, dt_s: f64, forced_relay: bool) -> Metrics {
@@ -86,7 +88,7 @@ pub fn collect(stats: &[RtcStats], labels: &HashMap<String, String>, prev: &mut 
             .unwrap_or_default()
     };
     let kbps = |id: &str, bytes: u64| match prev.0.get(id) {
-        Some(&(b, _, _)) if bytes >= b => (bytes - b) as f64 * 8.0 / 1000.0 / dt,
+        Some(&(b, ..)) if bytes >= b => (bytes - b) as f64 * 8.0 / 1000.0 / dt,
         _ => 0.0,
     };
 
@@ -129,20 +131,27 @@ pub fn collect(stats: &[RtcStats], labels: &HashMap<String, String>, prev: &mut 
                     fps: video.then_some(o.outbound.frames_per_second),
                     detail,
                 });
-                next.insert(id.clone(), (bytes, 0, 0));
+                next.insert(id.clone(), (bytes, 0, 0, 0));
             }
             RtcStats::InboundRtp(i) => {
                 let id = &i.rtc.id;
                 let bytes = i.inbound.bytes_received;
                 let (recv, lost) = (i.received.packets_received, i.received.packets_lost);
                 let loss_pct = match prev.0.get(id) {
-                    Some(&(_, r0, l0)) if recv >= r0 && lost >= l0 => {
+                    Some(&(_, r0, l0, _)) if recv >= r0 && lost >= l0 => {
                         let (dr, dl) = ((recv - r0) as f64, (lost - l0) as f64);
                         (dr + dl > 0.0).then(|| dl / (dr + dl) * 100.0)
                     }
                     _ => None,
                 };
                 let video = i.stream.kind == "video";
+                // framesPerSecond у входящего libwebrtc здесь не заполняет — считаем по приросту декодированных кадров.
+                let frames = u64::from(i.inbound.frames_decoded);
+                let fps = match prev.0.get(id) {
+                    _ if i.inbound.frames_per_second > 0.0 => i.inbound.frames_per_second,
+                    Some(&(.., f0)) if frames >= f0 => (frames - f0) as f64 / dt,
+                    _ => 0.0,
+                };
                 let detail = if video {
                     format!(
                         "{} · заморозок {} · выброшено {} · NACK {} PLI {}",
@@ -162,10 +171,10 @@ pub fn collect(stats: &[RtcStats], labels: &HashMap<String, String>, prev: &mut 
                     jitter_ms: Some(i.received.jitter * 1000.0),
                     codec: codec(&i.stream.codec_id),
                     size: (video && i.inbound.frame_width > 0).then_some((i.inbound.frame_width, i.inbound.frame_height)),
-                    fps: video.then_some(i.inbound.frames_per_second),
+                    fps: video.then_some(fps),
                     detail,
                 });
-                next.insert(id.clone(), (bytes, recv, lost));
+                next.insert(id.clone(), (bytes, recv, lost, frames));
             }
             _ => {}
         }
@@ -197,7 +206,7 @@ fn conn(stats: &[RtcStats]) -> Conn {
             })
         });
     let Some(pair) = pair else {
-        return Conn { path: Path::Unknown, remote: String::new(), rtt_ms: None, out_kbps_avail: None };
+        return Conn { path: Path::Unknown, remote: String::new(), turn: String::new(), rtt_ms: None, out_kbps_avail: None };
     };
     let cp = &pair.candidate_pair;
     let local = stats.iter().find_map(|s| match s {
@@ -221,9 +230,14 @@ fn conn(stats: &[RtcStats]) -> Conn {
         Some(l) => Path::Direct { proto: l.protocol.clone() },
         None => Path::Unknown,
     };
+    let turn = match (&path, local) {
+        (Path::Relay { .. }, Some(l)) => l.url.clone(),
+        _ => String::new(),
+    };
     Conn {
         path,
         remote: remote.map(|r| format!("{}:{}", r.address, r.port)).unwrap_or_default(),
+        turn,
         rtt_ms: (cp.current_round_trip_time > 0.0).then_some(cp.current_round_trip_time * 1000.0),
         out_kbps_avail: (cp.available_outgoing_bitrate > 0.0).then_some(cp.available_outgoing_bitrate / 1000.0),
     }
@@ -242,6 +256,7 @@ mod tests {
         let mut local = json!({"type":"local-candidate","id":"L1","timestamp":0,"address":"10.0.0.2","port":5000,"protocol":"udp","candidateType":cand_type});
         if let Some(r) = relay {
             local["relayProtocol"] = json!(r);
+            local["url"] = json!("turns:turn.steins-gate.ru:443?transport=tcp");
         }
         vec![
             stat(json!({"type":"transport","id":"T1","timestamp":0,"selectedCandidatePairId":"P1"})),
@@ -266,6 +281,7 @@ mod tests {
         assert_eq!(m.conn.remote, "77.222.35.128:443");
         assert!((m.conn.rtt_ms.unwrap() - 42.0).abs() < 1e-9);
         assert_eq!(m.conn.out_kbps_avail, Some(3000.0));
+        assert_eq!(m.conn.turn, "turns:turn.steins-gate.ru:443?transport=tcp");
     }
 
     #[test]
@@ -273,6 +289,7 @@ mod tests {
         let m = run(&pair_stats("host", None), &mut Counters::default());
         assert_eq!(m.conn.path, Path::Direct { proto: "udp".into() });
         assert_eq!(m.conn.path.to_string(), "напрямую UDP");
+        assert_eq!(m.conn.turn, "");
     }
 
     #[test]
@@ -312,6 +329,17 @@ mod tests {
         let m = run(&[inbound(1000, 10, 0, "TR_a")], &mut prev);
         assert_eq!(m.rows[0].kbps, 0.0);
         assert_eq!(m.rows[0].loss_pct, None);
+    }
+
+    #[test]
+    fn inbound_video_fps_from_decoded_frames() {
+        let v = |frames: u32| stat(json!({"type":"inbound-rtp","id":"IV","timestamp":0,"kind":"video","trackIdentifier":"TR_a",
+            "framesDecoded":frames,"frameWidth":1920,"frameHeight":1080}));
+        let mut prev = Counters::default();
+        run(&[v(100)], &mut prev);
+        let m = collect(&[v(160)], &HashMap::new(), &mut prev, 2.0, false);
+        assert_eq!(m.rows[0].fps, Some(30.0));
+        assert_eq!(m.rows[0].size, Some((1920, 1080)));
     }
 
     #[test]

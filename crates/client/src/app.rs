@@ -94,6 +94,9 @@ pub struct App {
     channels_error: Option<String>,
     channels_at: Instant,
     settings_open: bool,
+    /// Отладочный оверлей метрик (F3).
+    metrics_open: bool,
+    metrics_init: bool,
     popup: Option<VolumePopup>,
     invite: Option<Result<Invite, String>>,
     invite_busy: bool,
@@ -206,6 +209,8 @@ impl App {
             channels_error: None,
             channels_at: Instant::now(),
             settings_open: false,
+            metrics_open: false,
+            metrics_init: false,
             popup: None,
             invite: None,
             invite_busy: false,
@@ -1406,6 +1411,99 @@ impl App {
         let _ = screen;
     }
 
+    /// Отладочный оверлей (F3): путь до SFU, RTT и строка на каждый поток. `AMADEUS_METRICS=1` — открыт при старте.
+    fn ui_metrics(&mut self, ui: &mut Ui) {
+        let f3 = ui.input(|i| i.key_pressed(egui::Key::F3));
+        if f3 || (!self.metrics_init && std::env::var_os("AMADEUS_METRICS").is_some()) {
+            self.metrics_open = !self.metrics_open;
+            self.voice.send(Cmd::Metrics(self.metrics_open));
+        }
+        self.metrics_init = true;
+        if !self.metrics_open {
+            return;
+        }
+        use crate::metrics::{Dir, Path};
+        let m = self.voice.state.lock().unwrap().metrics.clone();
+        let mono = |s: String, c: Color32| RichText::new(s).monospace().size(12.0).color(c);
+        let loss_color = |p: Option<f64>| match p {
+            Some(p) if p >= 5.0 => t::SIGNAL,
+            Some(p) if p >= 2.0 => t::NIXIE,
+            _ => t::PAPER,
+        };
+        let mut dump = false;
+        egui::Area::new(Id::new("metrics-overlay"))
+            .order(egui::Order::Tooltip)
+            .anchor(Align2::RIGHT_TOP, vec2(-12.0, if self.fullscreen { 12.0 } else { 52.0 }))
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(Color32::from_black_alpha(217))
+                    .stroke(Stroke::new(1.0, t::BRASS))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(mono("F3 · метрики".into(), t::DUST));
+                        let Some(m) = &m else {
+                            ui.label(mono("не в канале".into(), t::PAPER));
+                            return;
+                        };
+                        let c = &m.conn;
+                        let path_color = match c.path {
+                            Path::Relay { .. } => t::NIXIE,
+                            Path::Unknown => t::SIGNAL,
+                            Path::Direct { .. } => t::PAPER,
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(mono(format!("путь  {}", c.path), path_color));
+                            ui.label(mono(format!("SFU {}", c.remote), t::DUST));
+                            if !c.turn.is_empty() {
+                                ui.label(mono(format!("через {}", c.turn), t::DUST));
+                            }
+                            if m.forced_relay {
+                                ui.label(mono("FORCE RELAY".into(), t::SIGNAL));
+                            }
+                        });
+                        let rtt = c.rtt_ms.map_or("—".into(), |r| format!("{r:.0} мс"));
+                        let avail = c.out_kbps_avail.map_or("—".into(), |k| format!("{:.1} Мбит/с", k / 1000.0));
+                        ui.label(mono(format!("RTT   {rtt}   канал ↑ {avail}"), t::PAPER));
+                        ui.add_space(4.0);
+                        egui::Grid::new("metrics-rows").spacing(vec2(10.0, 1.0)).show(ui, |ui| {
+                            for h in ["", "поток", "кбит/с", "потери", "джиттер", "кадры", ""] {
+                                ui.label(mono(h.into(), t::DUST));
+                            }
+                            ui.end_row();
+                            for r in &m.rows {
+                                let arrow = if r.dir == Dir::Out { "↑" } else { "↓" };
+                                ui.label(mono(format!("{arrow} {}", if r.kind == "video" { "V" } else { "A" }), t::DUST));
+                                ui.label(mono(format!("{} {}", r.label, r.codec), t::PAPER));
+                                ui.label(mono(format!("{:>6.0}", r.kbps), t::PAPER));
+                                ui.label(mono(r.loss_pct.map_or("—".into(), |p| format!("{p:.1}%")), loss_color(r.loss_pct)));
+                                ui.label(mono(r.jitter_ms.map_or("—".into(), |j| format!("{j:.0} мс")), t::PAPER));
+                                let frames = match (r.size, r.fps) {
+                                    (Some((w, h)), Some(f)) => format!("{w}×{h} {f:.0}"),
+                                    (None, Some(f)) => format!("{f:.0} к/с"),
+                                    _ => String::new(),
+                                };
+                                ui.label(mono(frames, t::PAPER));
+                                ui.label(mono(r.detail.clone(), t::DUST));
+                                ui.end_row();
+                            }
+                        });
+                        if m.rows.is_empty() {
+                            ui.label(mono("потоков нет".into(), t::DUST));
+                        }
+                        ui.add_space(4.0);
+                        if ui.small_button("Снимок статистики в лог").clicked() {
+                            dump = true;
+                        }
+                    });
+            });
+        if dump {
+            self.voice.send(Cmd::DumpStats);
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(500));
+    }
+
     fn ui_volume_popup(&mut self, ui: &mut Ui, vs: &VoiceState) {
         let Some(pop) = &self.popup else { return };
         let (identity, name, pos, opened) = (pop.identity.clone(), pop.name.clone(), pop.pos, pop.opened_at);
@@ -1946,6 +2044,7 @@ impl eframe::App for App {
         if self.update_open {
             self.ui_update(ui);
         }
+        self.ui_metrics(ui);
         if !self.fullscreen {
             crate::frame::resize_edges(ui.ctx());
         }
