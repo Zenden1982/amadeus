@@ -14,11 +14,7 @@ const BTN_W: f32 = 34.0;
 /// Толщина зоны ресайза у края окна (и больше — в углах).
 const EDGE: f32 = 5.0;
 const CORNER: f32 = 12.0;
-const BG: Color32 = Color32::from_rgb(0x12, 0x0E, 0x0B);
 /// Погашенная лампа — тёмное стекло.
-const LAMP_OFF: Color32 = Color32::from_rgb(0x2A, 0x22, 0x1C);
-const BEZEL_OFF: Color32 = Color32::from_rgb(0x3A, 0x2F, 0x25);
-const SEPARATOR: Color32 = Color32::from_rgb(0x1E, 0x18, 0x13);
 /// Радиусы лампы: ядро и латунный ободок.
 const LAMP_R: f32 = 6.5;
 const BEZEL_R: f32 = 8.5;
@@ -35,7 +31,7 @@ pub fn style_native_window(cc: &eframe::CreationContext<'_>) {
         let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
         let hwnd = h.hwnd.get() as windows_sys::Win32::Foundation::HWND;
         let corner: i32 = DWMWCP_ROUND;
-        let c = t::BRASS_DIM;
+        let c = t::BORDER_DIM;
         // COLORREF = 0x00BBGGRR
         let border: u32 = (c.b() as u32) << 16 | (c.g() as u32) << 8 | c.r() as u32;
         unsafe {
@@ -121,7 +117,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
         .exact_size(HEIGHT)
         .resizable(false)
         .show_separator_line(false)
-        .frame(egui::Frame::new().fill(BG))
+        .frame(egui::Frame::new().fill(t::TITLE_BG))
         .show(ui, |ui| {
             let ctx = ui.ctx().clone();
             let r = ui.max_rect();
@@ -137,16 +133,16 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
                 let galley = ui.painter().layout_no_wrap(
                     format!("{}  {text}", egui_phosphor::regular::ARROW_CIRCLE_UP),
                     t::bold(12.5),
-                    t::NIXIE,
+                    t::ACCENT,
                 );
                 let size = vec2(galley.size().x + 20.0, 22.0);
                 let rect = Rect::from_min_size(pos2(minb.left() - 12.0 - size.x, r.center().y - size.y / 2.0), size);
                 let resp = ui.interact(rect, Id::new("titlebar-badge"), Sense::click());
                 let lit = ctx.animate_bool_with_time(Id::new("titlebar-badge-lit"), resp.hovered(), 0.12);
                 let p = ui.painter();
-                p.rect_filled(rect.expand(3.0 * lit), CornerRadius::same(13), t::NIXIE.gamma_multiply(0.10 * lit));
-                p.rect(rect, CornerRadius::same(11), t::NIXIE.gamma_multiply(0.08 + 0.10 * lit), Stroke::new(1.0, t::BRASS), egui::StrokeKind::Inside);
-                p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::NIXIE);
+                p.rect_filled(rect.expand(3.0 * lit), CornerRadius::same(13), t::ACCENT.gamma_multiply(0.10 * lit));
+                p.rect(rect, CornerRadius::same(11), t::ACCENT.gamma_multiply(0.08 + 0.10 * lit), Stroke::new(1.0, t::BORDER), egui::StrokeKind::Inside);
+                p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::ACCENT);
                 if resp.on_hover_text("Скачать и перезапустить").clicked() {
                     badge_clicked = true;
                 }
@@ -164,12 +160,12 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
             }
 
             let p = ui.painter();
-            p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, SEPARATOR));
+            p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t::TITLE_SEPARATOR));
             let name_pos = pos2(r.left() + 14.0, r.center().y + 1.0);
             if focused {
-                t::nixie_text(p, name_pos, Align2::LEFT_CENTER, "AMADEUS", 19.0);
+                t::glow_text(p, name_pos, Align2::LEFT_CENTER, "AMADEUS", 19.0);
             } else {
-                p.text(name_pos, Align2::LEFT_CENTER, "AMADEUS", t::nixie(19.0), t::NIXIE.gamma_multiply(0.45));
+                p.text(name_pos, Align2::LEFT_CENTER, "AMADEUS", t::display_font(19.0), t::ACCENT.gamma_multiply(0.45));
             }
 
             let forced = forced_hover();
@@ -231,12 +227,12 @@ struct LampColors {
 /// Цвета лампы; `lit` 0..1 — насколько она зажглась.
 fn lamp_colors(kind: Btn, lit: f32) -> LampColors {
     let lit = lit.clamp(0.0, 1.0);
-    let on = if kind == Btn::Close { t::SIGNAL } else { t::NIXIE };
+    let on = if kind == Btn::Close { t::DANGER } else { t::ACCENT };
     let a = (lit * 255.0).round() as u8;
     LampColors {
-        core: LAMP_OFF.lerp_to_gamma(on, lit),
+        core: t::LAMP_OFF.lerp_to_gamma(on, lit),
         glow: Color32::from_rgba_unmultiplied(on.r(), on.g(), on.b(), (lit * 120.0).round() as u8),
-        glyph: Color32::from_rgba_unmultiplied(t::ON_NIXIE.r(), t::ON_NIXIE.g(), t::ON_NIXIE.b(), a),
+        glyph: Color32::from_rgba_unmultiplied(t::ON_ACCENT.r(), t::ON_ACCENT.g(), t::ON_ACCENT.b(), a),
     }
 }
 
@@ -246,12 +242,12 @@ fn draw_lamp(p: &egui::Painter, c: Pos2, kind: Btn, maximized: bool, lit: f32) {
         t::radial_glow(p, c, 16.0, col.glow);
     }
     // латунный ободок: тускнеет, пока лампа не горит
-    let bezel = BEZEL_OFF.lerp_to_gamma(t::BRASS_LOGO, lit);
-    p.circle_filled(c, BEZEL_R, Color32::from_rgb(0x15, 0x11, 0x0D));
+    let bezel = t::BEZEL_OFF.lerp_to_gamma(t::BORDER_STRONG, lit);
+    p.circle_filled(c, BEZEL_R, t::BEZEL_RIM);
     p.circle_stroke(c, BEZEL_R - 1.0, Stroke::new(2.0, bezel));
     p.circle_filled(c, LAMP_R, col.core);
     // блик на стекле (сверху слева)
-    let shine = if lit > 0.01 { t::FILAMENT.gamma_multiply(0.75 * lit) } else { Color32::from_white_alpha(14) };
+    let shine = if lit > 0.01 { t::ACCENT_BRIGHT.gamma_multiply(0.75 * lit) } else { Color32::from_white_alpha(14) };
     p.circle_filled(c + vec2(-2.0, -2.2), 2.2, shine);
     if col.glyph.a() > 0 {
         draw_icon(p, c, kind, maximized, col.glyph);
@@ -305,10 +301,10 @@ mod tests {
             let off = lamp_colors(k, 0.0);
             assert_eq!(off.glyph.a(), 0);
             assert_eq!(off.glow.a(), 0);
-            assert_eq!(off.core, LAMP_OFF);
+            assert_eq!(off.core, t::LAMP_OFF);
             let on = lamp_colors(k, 1.0);
             assert_eq!(on.glyph.a(), 255);
-            assert_eq!(on.core, if k == Btn::Close { t::SIGNAL } else { t::NIXIE });
+            assert_eq!(on.core, if k == Btn::Close { t::DANGER } else { t::ACCENT });
         }
     }
 }

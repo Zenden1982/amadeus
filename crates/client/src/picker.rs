@@ -107,11 +107,11 @@ impl Picker {
         self.poll(ctx);
         let mut action = Action::None;
         let modal = egui::Modal::new(Id::new("stream-picker"))
-            .backdrop_color(Color32::from_rgba_unmultiplied(10, 8, 6, 185))
+            .backdrop_color(t::SCRIM)
             .frame(
                 Frame::new()
-                    .fill(t::BAKELITE)
-                    .stroke(Stroke::new(1.0, t::BRASS))
+                    .fill(t::SURFACE)
+                    .stroke(Stroke::new(1.0, t::BORDER))
                     .corner_radius(CornerRadius::same(14))
                     .inner_margin(Margin::symmetric(28, 24))
                     .shadow(ctx.global_style().visuals.window_shadow),
@@ -161,13 +161,13 @@ impl Picker {
             for (tab, icon, name, n) in [(Tab::Windows, ph::APP_WINDOW, "Окна приложений", nw), (Tab::Screens, ph::MONITOR, "Экраны", ns)] {
                 let on = self.tab == tab;
                 let text = if self.sources.is_some() { format!("{icon}  {name}  {n}") } else { format!("{icon}  {name}") };
-                let galley = ui.painter().layout_no_wrap(text, t::semibold(14.0), t::PAPER);
+                let galley = ui.painter().layout_no_wrap(text, t::semibold(14.0), t::TEXT);
                 let (rect, resp) = ui.allocate_exact_size(galley.size() + vec2(28.0, 16.0), Sense::click());
                 let p = ui.painter();
-                let fill = if on { t::nixie_a(30) } else if resp.hovered() { t::BAKELITE_2 } else { Color32::TRANSPARENT };
-                let stroke = if on { Stroke::new(1.0, t::nixie_a(150)) } else { Stroke::new(1.0, t::BRASS_DIM) };
+                let fill = if on { t::accent_a(30) } else if resp.hovered() { t::SURFACE_2 } else { Color32::TRANSPARENT };
+                let stroke = if on { Stroke::new(1.0, t::accent_a(150)) } else { Stroke::new(1.0, t::BORDER_DIM) };
                 p.rect(rect, CornerRadius::same(255), fill, stroke, StrokeKind::Inside);
-                p.galley(rect.center() - galley.size() / 2.0, galley, if on { t::FILAMENT } else { t::DUST });
+                p.galley(rect.center() - galley.size() / 2.0, galley, if on { t::ACCENT_BRIGHT } else { t::TEXT_MUTED });
                 if resp.clicked() {
                     self.tab = tab;
                 }
@@ -179,9 +179,9 @@ impl Picker {
         let Some(sources) = &self.sources else {
             ui.add_space(60.0);
             ui.vertical_centered(|ui| {
-                ui.add(egui::Spinner::new().size(26.0).color(t::NIXIE));
+                ui.add(egui::Spinner::new().size(26.0).color(t::ACCENT));
                 ui.add_space(8.0);
-                ui.label(RichText::new("Ищем окна…").color(t::DUST));
+                ui.label(RichText::new("Ищем окна…").color(t::TEXT_MUTED));
             });
             ui.add_space(60.0);
             return None;
@@ -189,7 +189,7 @@ impl Picker {
         let list: Vec<&Source> = sources.iter().filter(|s| s.id.is_window() == (self.tab == Tab::Windows)).collect();
         if list.is_empty() {
             ui.add_space(40.0);
-            ui.vertical_centered(|ui| ui.label(RichText::new("Здесь пусто — откройте нужное окно и нажмите «Обновить»").color(t::DUST)));
+            ui.vertical_centered(|ui| ui.label(RichText::new("Здесь пусто — откройте нужное окно и нажмите «Обновить»").color(t::TEXT_MUTED)));
             ui.add_space(40.0);
             return None;
         }
@@ -227,13 +227,13 @@ impl Picker {
         let (thumb, icon) = self.tex.get(&s.id).cloned().unwrap_or((None, None));
         if selected {
             for i in 0..3 {
-                p.rect_filled(rect.expand(2.0 + i as f32 * 3.0), CornerRadius::same(14 + 3 * i as u8), t::nixie_a(9));
+                p.rect_filled(rect.expand(2.0 + i as f32 * 3.0), CornerRadius::same(14 + 3 * i as u8), t::accent_a(9));
             }
         }
-        let fill = if hovered || selected { t::BAKELITE_2 } else { Color32::from_rgb(0x1D, 0x18, 0x14) };
+        let fill = if hovered || selected { t::SURFACE_2 } else { t::SURFACE_CARD };
         p.rect_filled(rect, CornerRadius::same(12), fill);
         let tr = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 16.0, thumb_h - 8.0));
-        p.rect_filled(tr, CornerRadius::same(8), t::GLASS);
+        p.rect_filled(tr, CornerRadius::same(8), t::BG);
         match &thumb {
             Some(tex) => {
                 let size = tex.size_vec2();
@@ -248,14 +248,14 @@ impl Picker {
                         p.image(ic.id(), Rect::from_center_size(c, vec2(40.0, 40.0)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                     }
                     None => {
-                        p.text(c, Align2::CENTER_CENTER, ph::APP_WINDOW, t::font(36.0), t::DUST);
+                        p.text(c, Align2::CENTER_CENTER, ph::APP_WINDOW, t::font(36.0), t::TEXT_MUTED);
                     }
                 }
                 let note = if s.minimized { "свёрнуто — разверните окно" } else { "нет превью" };
-                p.text(pos2(tr.center().x, tr.bottom() - 16.0), Align2::CENTER_CENTER, note, t::font(12.0), t::DUST);
+                p.text(pos2(tr.center().x, tr.bottom() - 16.0), Align2::CENTER_CENTER, note, t::font(12.0), t::TEXT_MUTED);
             }
         }
-        let stroke = if selected { Stroke::new(2.0, t::NIXIE) } else if hovered { Stroke::new(1.0, t::BRASS) } else { Stroke::new(1.0, t::BRASS_DIM) };
+        let stroke = if selected { Stroke::new(2.0, t::ACCENT) } else if hovered { Stroke::new(1.0, t::BORDER) } else { Stroke::new(1.0, t::BORDER_DIM) };
         p.rect_stroke(rect, CornerRadius::same(12), stroke, StrokeKind::Inside);
 
         // подпись: иконка + заголовок, ниже — программа/разрешение
@@ -265,26 +265,26 @@ impl Picker {
             if let Some(ic) = &icon {
                 p.image(ic.id(), Rect::from_min_size(pos2(tx, ty + 1.0), vec2(18.0, 18.0)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             } else {
-                p.text(pos2(tx + 9.0, ty + 10.0), Align2::CENTER_CENTER, ph::APP_WINDOW, t::font(16.0), t::DUST);
+                p.text(pos2(tx + 9.0, ty + 10.0), Align2::CENTER_CENTER, ph::APP_WINDOW, t::font(16.0), t::TEXT_MUTED);
             }
         } else {
-            p.text(pos2(tx + 9.0, ty + 10.0), Align2::CENTER_CENTER, ph::MONITOR, t::font(17.0), if selected { t::NIXIE } else { t::DUST });
+            p.text(pos2(tx + 9.0, ty + 10.0), Align2::CENTER_CENTER, ph::MONITOR, t::font(17.0), if selected { t::ACCENT } else { t::TEXT_MUTED });
         }
         tx += 26.0;
         let max_w = rect.right() - 12.0 - tx;
-        let title = elided(p, &s.title, t::semibold(13.5), if selected { t::FILAMENT } else { t::PAPER }, max_w);
-        p.galley(pos2(tx, ty + 10.0 - title.size().y / 2.0), title, t::PAPER);
-        let sub = elided(p, &s.app, t::font(12.0), t::DUST, rect.width() - 24.0);
-        p.galley(pos2(rect.left() + 12.0, ty + 24.0), sub, t::DUST);
+        let title = elided(p, &s.title, t::semibold(13.5), if selected { t::ACCENT_BRIGHT } else { t::TEXT }, max_w);
+        p.galley(pos2(tx, ty + 10.0 - title.size().y / 2.0), title, t::TEXT);
+        let sub = elided(p, &s.app, t::font(12.0), t::TEXT_MUTED, rect.width() - 24.0);
+        p.galley(pos2(rect.left() + 12.0, ty + 24.0), sub, t::TEXT_MUTED);
     }
 
     fn ui_footer(&mut self, ui: &mut Ui) -> Option<Action> {
         let mut out = None;
         let top = ui.cursor().top() - 8.0;
-        ui.painter().hline(ui.max_rect().x_range(), top, Stroke::new(1.0, t::BRASS_DIM));
+        ui.painter().hline(ui.max_rect().x_range(), top, Stroke::new(1.0, t::BORDER_DIM));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Качество").size(13.0).color(t::DUST));
+            ui.label(RichText::new("Качество").size(13.0).color(t::TEXT_MUTED));
             egui::ComboBox::from_id_salt("preset").selected_text(self.preset.label()).width(170.0).show_ui(ui, |ui| {
                 for p in Preset::ALL {
                     ui.selectable_value(&mut self.preset, p, p.label());
@@ -313,7 +313,7 @@ impl Picker {
         ui.label(
             RichText::new("Кодирует видеокарта (NVIDIA/AMD/Intel); если она не умеет — процессор, тогда 60 к/с могут проседать.")
                 .size(12.0)
-                .color(t::DUST),
+                .color(t::TEXT_MUTED),
         );
         out
     }
