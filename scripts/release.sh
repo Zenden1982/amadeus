@@ -3,6 +3,7 @@
 #
 #   scripts/release.sh "Что нового (одна-две строки)"            — собрать и выложить на домашний сервер
 #   NO_UPLOAD=1 scripts/release.sh "…"                             — только собрать в dist/<версия>/
+#   NO_GITHUB=1 scripts/release.sh "…"                             — без релиза на GitHub (scripts/gh-release.sh)
 #
 # Версия — из [workspace.package] в Cargo.toml (поднять перед выпуском: клиенты обновляются, только если она больше).
 # На сервере: файлы → $REMOTE_DIR (том бэкенда, /data/releases в контейнере), latest.json кладётся последним —
@@ -56,4 +57,8 @@ ssh "$REMOTE_HOST" "set -e
   sudo mv $REMOTE_DIR/latest.json.tmp $REMOTE_DIR/latest.json
   rm -rf $TMP
   ls -la $REMOTE_DIR"
+# Установщик — ещё и в релизы GitHub (коммит должен быть запушен). NO_GITHUB=1 — пропустить.
+if [[ -z "${NO_GITHUB:-}" ]]; then
+    bash scripts/gh-release.sh "$VERSION" "$NOTES" || echo "!! GitHub-релиз не сделан — повторить: scripts/gh-release.sh $VERSION \"…\""
+fi
 echo "== готово: клиенты увидят $VERSION при следующей проверке (до 6 ч) или по «Проверить обновления»"
