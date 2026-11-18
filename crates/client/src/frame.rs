@@ -112,7 +112,7 @@ enum Btn {
 }
 
 /// Полоса заголовка — первой панелью кадра (на всю ширину окна). В полноэкранном режиме не показывать.
-/// Вид «индикаторные лампы»: слева значок-осциллограф и «AMADEUS» газоразрядным шрифтом, кнопки — три лампы в латунных ободках,
+/// Вид «индикаторные лампы»: слева «AMADEUS» газоразрядным шрифтом (без значка), кнопки — три лампы в латунных ободках,
 /// при наведении загораются (янтарь; «закрыть» — красная).
 /// `badge` — надпись-кнопка слева от ламп (есть обновление); возвращает true, если по ней кликнули.
 pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
@@ -165,9 +165,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
 
             let p = ui.painter();
             p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, SEPARATOR));
-            let logo = Rect::from_center_size(pos2(r.left() + 22.0, r.center().y), vec2(24.0, 24.0));
-            t::logo(p, logo, focused);
-            let name_pos = pos2(logo.right() + 6.0, r.center().y + 1.0);
+            let name_pos = pos2(r.left() + 14.0, r.center().y + 1.0);
             if focused {
                 t::nixie_text(p, name_pos, Align2::LEFT_CENTER, "AMADEUS", 19.0);
             } else {
