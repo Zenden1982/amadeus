@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Версия протокола API. Увеличивается при несовместимых изменениях.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Ограничения, общие для клиента и сервера (клиент может проверять заранее).
 pub mod limits {
@@ -26,6 +26,37 @@ pub mod limits {
     /// Сообщений в одной странице истории (по умолчанию / максимум).
     pub const HISTORY_PAGE: u32 = 50;
     pub const HISTORY_PAGE_MAX: u32 = 100;
+    /// Название сервера и категории, символов.
+    pub const SERVER_NAME_MAX: usize = 50;
+    pub const CATEGORY_NAME_MAX: usize = 50;
+    /// Отображаемое имя, символов.
+    pub const DISPLAY_NAME_MAX: usize = 32;
+    /// Лимит участников голосового канала (1..=).
+    pub const USER_LIMIT_MAX: u32 = 99;
+    /// Сколько серверов может создать (владеть) один человек.
+    pub const SERVERS_OWNED_MAX: usize = 20;
+    /// Аватар / иконка сервера: размер файла и сторона квадрата.
+    pub const IMAGE_PROFILE_MAX_BYTES: usize = 1024 * 1024;
+    pub const IMAGE_PROFILE_MAX_SIDE: u32 = 512;
+}
+
+/// Права на сервере — битовая маска (`Role::permissions`).
+pub mod perm {
+    pub const INVITE: u32 = 1;
+    pub const KICK: u32 = 2;
+    pub const BAN: u32 = 4;
+    /// Выкинуть из голосового канала.
+    pub const DISCONNECT: u32 = 8;
+    pub const MANAGE_CHANNELS: u32 = 16;
+    /// Назначать роли ниже своей.
+    pub const MANAGE_ROLES: u32 = 32;
+    /// Название, иконка, все приглашения сервера.
+    pub const MANAGE_SERVER: u32 = 64;
+    pub const ALL: u32 = 127;
+
+    pub fn has(perms: u32, p: u32) -> bool {
+        perms & p == p
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,7 +137,178 @@ pub struct LoginRequest {
 pub struct User {
     pub id: i64,
     pub name: String,
+    /// Админ инстанса (CLI, выпуски); к правам на серверах отношения не имеет.
     pub is_admin: bool,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Ключ картинки (`GET /images/{key}`).
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
+/// Человек, каким его видят другие.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicUser {
+    pub id: i64,
+    /// Логин.
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
+impl PublicUser {
+    /// Отображаемое имя, а если его нет — логин.
+    pub fn shown_name(&self) -> &str {
+        match self.display_name.as_deref() {
+            Some(n) if !n.is_empty() => n,
+            _ => &self.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: i64,
+    pub name: String,
+    /// Чем больше, тем выше (владелец 3, админ 2, модератор 1, участник 0).
+    pub position: i32,
+    pub permissions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Server {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    pub owner_id: i64,
+    pub roles: Vec<Role>,
+    /// Моя роль на этом сервере.
+    pub my_role_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    pub user: PublicUser,
+    pub role_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Category {
+    pub id: i64,
+    pub name: String,
+    pub position: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelLayout {
+    pub categories: Vec<Category>,
+    pub channels: Vec<Channel>,
+}
+
+/// Кто сейчас в голосовом канале (user id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceRoster {
+    pub channel_id: i64,
+    pub user_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ban {
+    pub user: PublicUser,
+    pub by: i64,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateServerRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateServerRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferRequest {
+    pub user_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetRoleRequest {
+    pub role_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanRequest {
+    pub user_id: i64,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateChannelRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `Some(None)` — снять лимит.
+    #[serde(default, with = "double_option")]
+    pub user_limit: Option<Option<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryRequest {
+    pub name: String,
+}
+
+/// Новый порядок: категории сверху вниз и каналы сверху вниз (с категорией каждого).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LayoutRequest {
+    pub categories: Vec<i64>,
+    pub channels: Vec<ChannelPlace>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelPlace {
+    pub id: i64,
+    #[serde(default)]
+    pub category_id: Option<i64>,
+}
+
+/// `PATCH /me`. Пустая строка — сбросить отображаемое имя.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateMeRequest {
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// `GET /invites/{code}` без входа: куда зовут.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvitePreview {
+    pub server_name: String,
+    #[serde(default)]
+    pub server_icon: Option<String>,
+}
+
+/// Отличает «поле не пришло» от «пришло null» (для снятия лимита).
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize>(v: &Option<Option<T>>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            None => s.serialize_none(),
+            Some(inner) => inner.serialize(s),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(d).map(Some)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,12 +349,25 @@ pub struct Channel {
     pub id: i64,
     pub name: String,
     pub kind: ChannelKind,
+    #[serde(default)]
+    pub server_id: i64,
+    #[serde(default)]
+    pub category_id: Option<i64>,
+    #[serde(default)]
+    pub position: i32,
+    /// Только у голосовых.
+    #[serde(default)]
+    pub user_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateChannelRequest {
     pub name: String,
     pub kind: ChannelKind,
+    #[serde(default)]
+    pub category_id: Option<i64>,
+    #[serde(default)]
+    pub user_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +396,8 @@ pub struct Invite {
     pub expires_at: Option<i64>,
     pub revoked: bool,
     pub created_by: i64,
+    #[serde(default)]
+    pub server_id: i64,
 }
 
 /// Автор сообщения (минимум, чтобы нарисовать строку).
@@ -188,6 +405,10 @@ pub struct Invite {
 pub struct Author {
     pub id: i64,
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 /// Вложение (пока только картинки). Файл — `GET /attachments/{id}` с авторизацией.
@@ -237,6 +458,18 @@ pub enum ServerEvent {
     /// Сервер не успел доставить часть событий — перечитать открытые каналы.
     Resync,
     MessageCreated { message: Message },
+    /// Сервер появился у меня (создал, вступил) или изменился.
+    ServerUpserted { server: Server },
+    /// Сервер пропал у меня (удалён, вышел, кикнут, забанен).
+    ServerRemoved { server_id: i64 },
+    MemberUpserted { server_id: i64, member: Member },
+    MemberRemoved { server_id: i64, user_id: i64 },
+    /// Полная раскладка каналов сервера после любого изменения.
+    LayoutChanged { server_id: i64, layout: ChannelLayout },
+    /// Новый состав голосового канала.
+    Voice { server_id: i64, roster: VoiceRoster },
+    /// Сменилось отображаемое имя или аватар.
+    UserUpdated { user: PublicUser },
 }
 
 /// Тело любого ответа с ошибкой.
@@ -259,6 +492,10 @@ mod tests {
             id: 1,
             name: "Общий".into(),
             kind: ChannelKind::Voice,
+            server_id: 1,
+            category_id: None,
+            position: 0,
+            user_limit: None,
         };
         let s = serde_json::to_string(&c).unwrap();
         assert!(s.contains(r#""kind":"voice""#), "{s}");
@@ -314,5 +551,53 @@ mod tests {
     fn create_invite_defaults() {
         let r: CreateInviteRequest = serde_json::from_str("{}").unwrap();
         assert!(r.uses.is_none() && r.expires_in_hours.is_none());
+    }
+    #[test]
+    fn old_channel_json_still_parses() {
+        let c: Channel = serde_json::from_str(r#"{"id":1,"name":"a","kind":"voice"}"#).unwrap();
+        assert_eq!(c.server_id, 0);
+        assert_eq!(c.category_id, None);
+        assert_eq!(c.position, 0);
+        assert_eq!(c.user_limit, None);
+    }
+
+    fn roundtrip(e: ServerEvent, tag: &str) {
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.starts_with(&format!(r#"{{"type":"{tag}""#)), "{s}");
+        let back: ServerEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn event_roundtrip() {
+        let user = PublicUser { id: 2, name: "okabe".into(), display_name: Some("Окабэ".into()), avatar: None };
+        let role = Role { id: 1, name: "Участник".into(), position: 0, permissions: perm::INVITE };
+        let server = Server { id: 3, name: "Лаборатория".into(), icon: None, owner_id: 2, roles: vec![role.clone()], my_role_id: 1 };
+        let ch = Channel { id: 5, name: "General".into(), kind: ChannelKind::Voice, server_id: 3, category_id: Some(4), position: 1, user_limit: Some(5) };
+        let layout = ChannelLayout { categories: vec![Category { id: 4, name: "Голос".into(), position: 0 }], channels: vec![ch] };
+        roundtrip(ServerEvent::ServerUpserted { server }, "server_upserted");
+        roundtrip(ServerEvent::ServerRemoved { server_id: 3 }, "server_removed");
+        roundtrip(ServerEvent::MemberUpserted { server_id: 3, member: Member { user: user.clone(), role_id: 1 } }, "member_upserted");
+        roundtrip(ServerEvent::MemberRemoved { server_id: 3, user_id: 2 }, "member_removed");
+        roundtrip(ServerEvent::LayoutChanged { server_id: 3, layout }, "layout_changed");
+        roundtrip(ServerEvent::Voice { server_id: 3, roster: VoiceRoster { channel_id: 5, user_ids: vec![2] } }, "voice");
+        roundtrip(ServerEvent::UserUpdated { user }, "user_updated");
+    }
+
+    #[test]
+    fn perm_has() {
+        assert!(perm::has(perm::ALL, perm::BAN));
+        assert!(!perm::has(perm::INVITE, perm::KICK));
+        assert_eq!(perm::ALL, 127);
+    }
+
+    #[test]
+    fn shown_name() {
+        let mut u = PublicUser { id: 1, name: "okabe".into(), display_name: None, avatar: None };
+        assert_eq!(u.shown_name(), "okabe");
+        u.display_name = Some(String::new());
+        assert_eq!(u.shown_name(), "okabe");
+        u.display_name = Some("Окабэ".into());
+        assert_eq!(u.shown_name(), "Окабэ");
     }
 }

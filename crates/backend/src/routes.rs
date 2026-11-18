@@ -119,6 +119,8 @@ async fn register(
     let resp = new_session(
         &state,
         User {
+            display_name: None,
+            avatar: None,
             id,
             name,
             is_admin: false,
@@ -152,7 +154,7 @@ async fn login(
         .execute(&state.inner.db)
         .await?;
     Ok(Json(
-        new_session(&state, User { id, name, is_admin }).await?,
+        new_session(&state, User { id, name, is_admin, display_name: None, avatar: None }).await?,
     ))
 }
 
@@ -166,6 +168,8 @@ async fn logout(State(state): State<AppState>, user: AuthUser) -> AppResult<Stat
 
 async fn me(user: AuthUser) -> Json<User> {
     Json(User {
+        display_name: None,
+        avatar: None,
         id: user.id,
         name: user.name,
         is_admin: user.is_admin,
@@ -209,6 +213,10 @@ async fn create_channel(
     Ok((
         StatusCode::CREATED,
         Json(Channel {
+            server_id: 1,
+            category_id: None,
+            position: 0,
+            user_limit: None,
             id,
             name,
             kind: req.kind,

@@ -114,7 +114,7 @@ pub async fn create_user(
     validate_password(password)?;
     let hash = hash_password_async(password.to_string()).await?;
     let id = insert_user(&mut *pool.acquire().await?, &name, &hash, is_admin).await?;
-    Ok(User { id, name, is_admin })
+    Ok(User { id, name, is_admin, display_name: None, avatar: None })
 }
 
 pub(crate) async fn insert_user(
@@ -168,6 +168,7 @@ pub async fn create_invite(
         .execute(pool)
         .await?;
     Ok(Invite {
+        server_id: 1,
         code,
         uses_left: uses,
         expires_at,
@@ -188,6 +189,7 @@ pub(crate) struct InviteRow {
 impl From<InviteRow> for Invite {
     fn from(r: InviteRow) -> Self {
         Invite {
+            server_id: 1,
             code: r.code,
             uses_left: u32::try_from(r.uses_left).unwrap_or(0),
             expires_at: r.expires_at,
@@ -211,6 +213,10 @@ impl TryFrom<ChannelRow> for Channel {
             AppError::Internal(anyhow::anyhow!("bad channel kind in db: {}", r.kind))
         })?;
         Ok(Channel {
+            server_id: 1,
+            category_id: None,
+            position: 0,
+            user_limit: None,
             id: r.id,
             name: r.name,
             kind,

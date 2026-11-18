@@ -405,6 +405,8 @@ impl Chat {
                     merge(&mut log.msgs, vec![message]);
                 }
             }
+            // серверы, участники, каналы, голос — забирает модель (фаза 9.1)
+            _ => {}
         }
     }
 
@@ -1400,7 +1402,7 @@ mod tests {
         Message {
             id,
             channel_id: 1,
-            author: proto::Author { id: 1, name: "a".into() },
+            author: proto::Author { id: 1, name: "a".into(), display_name: None, avatar: None },
             content: format!("m{id}"),
             created_at: 0,
             edited_at: None,

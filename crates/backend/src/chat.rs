@@ -117,6 +117,8 @@ async fn with_attachments(state: &AppState, rows: Vec<MessageRow>) -> AppResult<
             id: r.id,
             channel_id: r.channel_id,
             author: Author {
+                display_name: None,
+                avatar: None,
                 id: r.author_id,
                 name: r.author_name,
             },

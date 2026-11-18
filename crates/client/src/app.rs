@@ -2070,7 +2070,15 @@ fn demo_state(time: f64) -> VoiceState {
     };
     VoiceState {
         conn: if std::env::var_os("AMADEUS_DEMO_RECONNECT").is_some() { Conn::Reconnecting } else { Conn::Connected },
-        channel: Some(Channel { id: 1, name: "General".into(), kind: ChannelKind::Voice }),
+        channel: Some(Channel {
+            id: 1,
+            name: "General".into(),
+            kind: ChannelKind::Voice,
+            server_id: 1,
+            category_id: None,
+            position: 0,
+            user_limit: None,
+        }),
         peers: vec![
             peer("tester", true, false, false),
             peer("mayuri", false, true, false),
