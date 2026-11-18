@@ -7,6 +7,7 @@ mod chat;
 mod config;
 mod desktop;
 mod frame;
+mod metrics;
 mod mictest;
 mod picker;
 mod ptt;
