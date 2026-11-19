@@ -81,6 +81,11 @@ fn path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "Amadeus").map(|d| d.config_dir().join("settings.json"))
 }
 
+/// Файл лога рядом с настройками (при старте больше 2 МБ — начинается заново).
+pub fn log_path() -> Option<PathBuf> {
+    path().map(|p| p.with_file_name("amadeus.log"))
+}
+
 impl Settings {
     pub fn load() -> Self {
         let Some(p) = path() else { return Self::default() };

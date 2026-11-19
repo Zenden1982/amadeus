@@ -610,9 +610,10 @@ impl Engine {
             let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
             let publish = TrackPublishOptions {
                 source: TrackSource::Microphone,
-                // 64 кбит/с (как у Discord по умолчанию): заметно чище 32 на голосе, трафик всё равно мизерный.
-                audio_encoding: Some(AudioEncoding { max_bitrate: 64_000 }),
-                dtx: true,
+                // 128 кбит/с: максимум для голоса (Opus, фуллбэнд 48 кГц) — чище и «ярче» 64; трафик всё равно мал.
+                // DTX выключен: на паузах он даёт «рацию»/комфортный шум и режет тихие начала слов.
+                audio_encoding: Some(AudioEncoding { max_bitrate: 128_000 }),
+                dtx: false,
                 red: true,
                 ..Default::default()
             };
@@ -659,8 +660,11 @@ impl Engine {
     }
 
     async fn leave(&mut self) {
+        log::info!("выход: начало (комната: {})", self.room.is_some());
         self.stop_receivers();
+        log::info!("выход: приёмники видео остановлены");
         self.mic = None;
+        log::info!("выход: микрофонный трек отпущен");
         if let Some(st) = &mut self.stream {
             st.publication = None;
             if let Some(a) = &mut st.audio {
@@ -671,6 +675,7 @@ impl Engine {
             && let Err(e) = room.close().await {
                 log::warn!("закрытие комнаты: {e}");
             }
+        log::info!("выход: комната закрыта");
         self.last_peers.clear();
         self.counters = Default::default();
         self.metrics_at = None;

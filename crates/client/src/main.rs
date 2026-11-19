@@ -24,8 +24,23 @@ mod voice;
 use msvc_shim as _;
 
 fn main() -> eframe::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,livekit=info,libwebrtc=warn,wgpu=warn,eframe=warn"))
-        .init();
+    let mut logger = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,livekit=info,libwebrtc=warn,wgpu=warn,eframe=warn"),
+    );
+    // Лог — в файл (релиз без консоли): по нему разбираем зависания.
+    if let Some(p) = config::log_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if std::fs::metadata(&p).is_ok_and(|m| m.len() > 2_000_000) {
+            let _ = std::fs::rename(&p, p.with_file_name("amadeus.old.log"));
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+            logger.target(env_logger::Target::Pipe(Box::new(f)));
+        }
+    }
+    logger.init();
+    app::start_watchdog();
     let args = desktop::Args::parse(std::env::args().skip(1));
     // После обновления: дождаться, пока старая копия отпустит «единственный экземпляр».
     if let Some(pid) = args.after_update {

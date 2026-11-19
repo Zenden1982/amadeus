@@ -2124,9 +2124,43 @@ impl App {
     }
 }
 
+/// Метка последнего кадра UI (мс от старта) — по ней сторожок замечает зависание.
+static UI_BEAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UI_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn now_ms() -> u64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Сторожок: если UI-поток не отрисовывал кадр больше 3 с при видимом окне — пишет в лог (раз в 5 с).
+pub fn start_watchdog() {
+    use std::sync::atomic::Ordering::Relaxed;
+    now_ms();
+    let _ = std::thread::Builder::new().name("amadeus-watchdog".into()).spawn(|| {
+        let mut warned = 0u64;
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let beat = UI_BEAT.load(Relaxed);
+            let stalled = now_ms().saturating_sub(beat);
+            if UI_VISIBLE.load(Relaxed) && beat > 0 && stalled > 3000 {
+                if now_ms() - warned >= 5000 {
+                    warned = now_ms();
+                    log::error!("UI не отвечает уже {} с (последний кадр {} мс от старта)", stalled / 1000, beat);
+                }
+            } else if warned != 0 && stalled < 1000 {
+                log::warn!("UI снова отвечает");
+                warned = 0;
+            }
+        }
+    });
+}
+
 impl eframe::App for App {
     /// Вызывается и когда окно спрятано/свёрнуто (тогда `ui` не вызывается): трей, выход, обновления.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        UI_BEAT.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+        UI_VISIBLE.store(desktop::is_visible(self.window), std::sync::atomic::Ordering::Relaxed);
         self.updater.poll();
         #[cfg(debug_assertions)]
         self.debug_update_hooks();
