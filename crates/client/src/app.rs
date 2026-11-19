@@ -147,6 +147,8 @@ pub struct App {
     autostart_error: Option<String>,
     /// Запуск из автозагрузки: до этого момента держать окно спрятанным (eframe показывает его после первого кадра).
     hide_until: Option<Instant>,
+    /// Демо-режим без сервера (только debug, AMADEUS_DEMO).
+    demo: bool,
 }
 
 impl App {
@@ -155,7 +157,15 @@ impl App {
         crate::frame::style_native_window(cc);
         let ctx = cc.egui_ctx.clone();
         start_watchdog(ctx.clone());
-        let settings = Settings::load();
+        #[allow(unused_mut)]
+        let mut settings = Settings::load();
+        // Отладка: AMADEUS_THEME=dark|light — тема для скриншотов (не сохраняется).
+        #[cfg(debug_assertions)]
+        match std::env::var("AMADEUS_THEME").as_deref() {
+            Ok("dark") => settings.theme = ThemePref::Dark,
+            Ok("light") => settings.theme = ThemePref::Light,
+            _ => {}
+        }
         let api = Api::new(&settings.server_url, settings.session_token.clone());
         let repaint: Arc<dyn Fn() + Send + Sync> = {
             let ctx = ctx.clone();
@@ -251,6 +261,7 @@ impl App {
             quitting: false,
             autostart_error,
             hide_until: None,
+            demo: false,
         };
         if app.tray.is_some() && std::env::args().any(|a| a == desktop::ARG_TRAY) {
             // eframe показывает окно после первого кадра; свёрнутое — покажется только в панели задач,
@@ -262,10 +273,55 @@ impl App {
             app.fetch_me();
         }
         #[cfg(debug_assertions)]
+        if std::env::var_os("AMADEUS_DEMO").is_some() {
+            app.start_demo();
+        }
+        #[cfg(debug_assertions)]
         if std::env::var_os("AMADEUS_OPEN_SETTINGS").is_some() {
             app.open_settings();
         }
         app
+    }
+
+    /// Отладка: AMADEUS_DEMO=1 — главный экран без сервера (фиктивные «я», каналы и чат) для скриншотов.
+    #[cfg(debug_assertions)]
+    fn start_demo(&mut self) {
+        self.demo = true;
+        self.set_me(User { id: 1, name: "tester".into(), is_admin: false, display_name: Some("Тестер".into()), avatar: None });
+        let ch = |id: i64, name: &str, kind: ChannelKind, position: i32| proto::Channel {
+            id,
+            name: name.into(),
+            kind,
+            server_id: 1,
+            category_id: None,
+            position,
+            user_limit: None,
+        };
+        self.channels = vec![
+            ch(3, "общий", ChannelKind::Text, 0),
+            ch(4, "учёба", ChannelKind::Text, 1),
+            ch(1, "General", ChannelKind::Voice, 2),
+            ch(2, "Тихая", ChannelKind::Voice, 3),
+        ];
+        let msg = |id: i64, author: (i64, &str), content: &str, mins_ago: i64| proto::Message {
+            id,
+            channel_id: 3,
+            author: proto::Author { id: author.0, name: author.1.into(), display_name: None, avatar: None },
+            content: content.into(),
+            created_at: chrono::Utc::now().timestamp() - mins_ago * 60,
+            edited_at: None,
+            reply_to: None,
+            attachments: Vec::new(),
+        };
+        self.chat.demo_seed(3, vec![
+            msg(1, (2, "mayuri"), "Туттуру! Кто сегодня в катку?", 42),
+            msg(2, (3, "kurisu"), "Я после пар, часов в восемь.", 40),
+            msg(3, (1, "tester"), "Го в катку через 5 минут?", 2),
+        ]);
+        if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
+            self.view = View::Text(id);
+        }
+        self.screen = Screen::Main;
     }
 
     // ------------------------------------------------------------ фон
@@ -669,7 +725,7 @@ impl App {
     // ------------------------------------------------------------ главный экран
 
     fn ui_main(&mut self, ui: &mut Ui) {
-        if self.channels_at.elapsed() > CHANNELS_REFRESH {
+        if self.channels_at.elapsed() > CHANNELS_REFRESH && !self.demo {
             self.fetch_channels();
         }
         #[allow(unused_mut)]

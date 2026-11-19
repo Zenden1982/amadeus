@@ -203,6 +203,16 @@ impl Chat {
     }
 
     /// Новый сервер/сессия: всё забываем, старые задачи пишут в закрытый канал.
+    /// Отладка (AMADEUS_DEMO): готовая лента без сервера.
+    #[cfg(debug_assertions)]
+    pub fn demo_seed(&mut self, channel: i64, msgs: Vec<Message>) {
+        let log = self.logs.entry(channel).or_default();
+        log.msgs = msgs;
+        log.loaded = true;
+        log.reached_start = true;
+        log.scroll_to_bottom = true;
+    }
+
     pub fn set_api(&mut self, api: Api) {
         self.api = api;
         self.reset();
