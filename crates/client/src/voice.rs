@@ -671,11 +671,20 @@ impl Engine {
                 a.publication = None;
             }
         }
-        if let Some((room, _)) = self.room.take()
-            && let Err(e) = room.close().await {
-                log::warn!("закрытие комнаты: {e}");
-            }
-        log::info!("выход: комната закрыта");
+        // Закрытие комнаты — в фоне и с таймаутом: если нативная часть зависнет, движок и интерфейс не встанут.
+        if let Some((room, events)) = self.room.take() {
+            drop(events);
+            tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_secs(5), room.close()).await {
+                    Ok(Ok(())) => log::info!("выход: комната закрыта"),
+                    Ok(Err(e)) => log::warn!("закрытие комнаты: {e}"),
+                    Err(_) => log::error!("закрытие комнаты: не завершилось за 5 с"),
+                }
+                drop(room);
+                log::info!("выход: объект комнаты освобождён");
+            });
+        }
+        log::info!("выход: закрытие комнаты запущено");
         self.last_peers.clear();
         self.counters = Default::default();
         self.metrics_at = None;
