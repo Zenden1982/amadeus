@@ -45,7 +45,7 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
         let mut area = egui::ScrollArea::vertical();
         // Отладка: AMADEUS_GALLERY=2 — сразу прокрутить к нижней половине (для скриншота).
         if std::env::var("AMADEUS_GALLERY").as_deref() == Ok("2") {
-            area = area.vertical_scroll_offset(760.0);
+            area = area.vertical_scroll_offset(1000.0);
         }
         area.show(ui, |ui| {
             ui.horizontal(|ui| {
