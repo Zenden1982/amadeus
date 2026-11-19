@@ -13,11 +13,12 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::prelude::*;
 use livekit::webrtc::stats::RtcStats;
-use livekit::{AudioProcessingOptions, PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
+use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
 use proto::Channel;
 use tokio::sync::mpsc;
 
 use crate::api::Api;
+use crate::config::NoiseMode;
 use crate::sounds::{self, Sound};
 use crate::stream::{self, CaptureEvent, Preset};
 use crate::video::VideoHub;
@@ -43,7 +44,7 @@ pub enum Cmd {
     SetStreamVolume(String, f32),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
-    SetProcessing { aec: bool, ns: bool, agc: bool },
+    SetProcessing { aec: bool, noise: NoiseMode, agc: bool },
     SetSounds(bool),
     RefreshDevices,
     /// Новый API-клиент (после входа/смены сервера).
@@ -196,7 +197,7 @@ pub struct AudioPrefs {
     pub input: Option<String>,
     pub output: Option<String>,
     pub aec: bool,
-    pub ns: bool,
+    pub noise: NoiseMode,
     pub agc: bool,
     pub ptt_enabled: bool,
     pub sounds: bool,
@@ -212,6 +213,7 @@ pub fn spawn(
     video: VideoHub,
     repaint: Arc<dyn Fn() + Send + Sync>,
 ) -> VoiceHandle {
+    crate::denoise::install();
     let (tx, rx) = mpsc::unbounded_channel();
     let (cap_tx, cap_rx) = mpsc::unbounded_channel();
     let state: Shared = Arc::new(Mutex::new(VoiceState { ptt_enabled: prefs.ptt_enabled, ..Default::default() }));
@@ -425,17 +427,65 @@ impl Engine {
         }
     }
 
+    /// AudioOptions микрофонного трека WebRTC (патч vendor/webrtc-sys). Фильтр низких частот (<80 Гц, гул) — всегда.
+    fn device_audio_flags(&self) -> i32 {
+        use webrtc_sys::amadeus as a;
+        let mut f = a::HPF;
+        if self.prefs.aec {
+            f |= a::EC;
+        }
+        if self.prefs.agc {
+            f |= a::AGC;
+        }
+        if self.prefs.noise == NoiseMode::Standard {
+            f |= a::NS;
+        }
+        f
+    }
+
+    /// Обработка микрофона. В SDK микрофонный трек создавался всегда с AEC+NS+AGC WebRTC, а
+    /// `configure_audio_processing` переключает только аппаратную обработку, — поэтому флаги ставим патчем.
     fn apply_processing(&self) {
-        let Some(audio) = &self.audio else { return };
-        let opts = AudioProcessingOptions {
-            echo_cancellation: self.prefs.aec,
-            noise_suppression: self.prefs.ns,
-            auto_gain_control: self.prefs.agc,
+        let flags = self.device_audio_flags();
+        webrtc_sys::amadeus::set_device_audio_flags(flags);
+        crate::denoise::set_mode(self.prefs.noise);
+        log::info!("обработка микрофона: AEC={} AGC={} шумодав={:?}", self.prefs.aec, self.prefs.agc, self.prefs.noise);
+    }
+
+    /// Публикует микрофон в комнату (128 кбит/с, без DTX, с RED).
+    async fn publish_mic(&mut self, lp: &LocalParticipant) -> Option<LocalTrackPublication> {
+        let audio = self.audio.as_ref()?;
+        let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
+        let publish = TrackPublishOptions {
+            source: TrackSource::Microphone,
+            // 128 кбит/с: максимум для голоса (Opus, фуллбэнд 48 кГц) — чище и «ярче» 64; трафик всё равно мал.
+            // DTX выключен: на паузах он даёт «рацию»/комфортный шум и режет тихие начала слов.
+            audio_encoding: Some(AudioEncoding { max_bitrate: 128_000 }),
+            dtx: false,
+            red: true,
             ..Default::default()
         };
-        if let Err(e) = audio.configure_audio_processing(opts) {
-            log::warn!("настройка AEC/NS/AGC: {e}");
+        match lp.publish_track(LocalTrack::Audio(track), publish).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                log::error!("публикация микрофона: {e}");
+                self.set(|s| s.audio_error = Some(format!("Микрофон не опубликован: {e}")));
+                None
+            }
         }
+    }
+
+    /// Новые флаги обработки WebRTC — новый микрофонный трек (старый снимается).
+    async fn republish_mic(&mut self) {
+        let Some(lp) = self.room.as_ref().map(|(r, _)| r.local_participant()) else { return };
+        if let Some(old) = self.mic.take()
+            && let Err(e) = lp.unpublish_track(&old.sid()).await
+        {
+            log::warn!("снятие микрофона: {e}");
+        }
+        self.mic = self.publish_mic(&lp).await;
+        log::info!("микрофон перевыпущен с новой обработкой");
+        self.apply_mic();
     }
 
     fn apply_input(&mut self, id: Option<String>) {
@@ -532,11 +582,16 @@ impl Engine {
             }
             Cmd::SetInputDevice(id) => self.apply_input(id),
             Cmd::SetOutputDevice(id) => self.apply_output(id),
-            Cmd::SetProcessing { aec, ns, agc } => {
+            Cmd::SetProcessing { aec, noise, agc } => {
+                let before = self.device_audio_flags();
                 self.prefs.aec = aec;
-                self.prefs.ns = ns;
+                self.prefs.noise = noise;
                 self.prefs.agc = agc;
                 self.apply_processing();
+                // Флаги WebRTC действуют на новый трек: в канале — перевыпустить микрофон.
+                if self.device_audio_flags() != before && self.mic.is_some() {
+                    self.republish_mic().await;
+                }
             }
             Cmd::SetSounds(on) => self.prefs.sounds = on,
             Cmd::RefreshDevices => self.refresh_devices(),
@@ -622,26 +677,8 @@ impl Engine {
         if self.audio.is_none() {
             self.init_audio();
         }
-        let mut mic = None;
-        if let Some(audio) = &self.audio {
-            let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
-            let publish = TrackPublishOptions {
-                source: TrackSource::Microphone,
-                // 128 кбит/с: максимум для голоса (Opus, фуллбэнд 48 кГц) — чище и «ярче» 64; трафик всё равно мал.
-                // DTX выключен: на паузах он даёт «рацию»/комфортный шум и режет тихие начала слов.
-                audio_encoding: Some(AudioEncoding { max_bitrate: 128_000 }),
-                dtx: false,
-                red: true,
-                ..Default::default()
-            };
-            match room.local_participant().publish_track(LocalTrack::Audio(track), publish).await {
-                Ok(p) => mic = Some(p),
-                Err(e) => {
-                    log::error!("публикация микрофона: {e}");
-                    self.set(|s| s.audio_error = Some(format!("Микрофон не опубликован: {e}")));
-                }
-            }
-        }
+        self.apply_processing();
+        let mic = self.publish_mic(&room.local_participant()).await;
         // Переподключение во время трансляции: тот же источник — в новую комнату.
         if let Some(st) = &mut self.stream {
             match stream::publish(&room, &st.source, st.preset, st.hw).await {

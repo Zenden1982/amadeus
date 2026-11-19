@@ -15,6 +15,8 @@
 #[cfg(target_os = "android")]
 pub mod android;
 pub mod apm;
+// Amadeus patch: обработка микрофона (флаги AudioOptions, колбэк захвата).
+pub mod amadeus;
 pub mod audio_device_controller;
 pub mod audio_mixer;
 pub mod audio_resampler;

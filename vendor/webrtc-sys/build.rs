@@ -95,6 +95,8 @@ fn main() {
         "src/global_task_queue.cpp",
         "src/prohibit_libsrtp_initialization.cpp",
         "src/apm.cpp",
+        // Amadeus patch
+        "src/amadeus_audio.cpp",
         "src/audio_mixer.cpp",
         "src/av1_bitstream.cpp",
         "src/packet_trailer.cpp",

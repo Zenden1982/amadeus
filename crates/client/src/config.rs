@@ -16,6 +16,35 @@ pub const DEFAULT_SERVER: &str = match option_env!("AMADEUS_SERVER") {
 /// Клавиша рации по умолчанию — V (виртуальный код Windows).
 pub const DEFAULT_PTT_KEY: u32 = 0x56;
 
+/// Шумоподавление микрофона.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseMode {
+    /// Без шумоподавления (студийный микрофон, тихая комната).
+    Off,
+    /// Шумоподавление WebRTC — режет верх, голос «глуше».
+    Standard,
+    /// Лёгкая нейросеть RNNoise: +10 мс, дёшево, но белое шипение почти не убирает.
+    #[serde(rename = "rnnoise")]
+    Light,
+    /// Нейросеть DeepFilterNet3 (по умолчанию): убирает и шум, и шипение, полоса 48 кГц сохраняется; +30 мс.
+    #[default]
+    Neural,
+}
+
+impl NoiseMode {
+    pub const ALL: [NoiseMode; 4] = [NoiseMode::Neural, NoiseMode::Light, NoiseMode::Standard, NoiseMode::Off];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NoiseMode::Off => "Выключено",
+            NoiseMode::Standard => "Обычное (WebRTC)",
+            NoiseMode::Light => "Нейросеть, лёгкая (RNNoise)",
+            NoiseMode::Neural => "Нейросеть (DeepFilterNet)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -29,7 +58,8 @@ pub struct Settings {
     pub ptt_enabled: bool,
     pub ptt_key: u32,
     pub echo_cancellation: bool,
-    pub noise_suppression: bool,
+    /// Шумоподавление микрофона (старое поле noise_suppression: bool больше не читается).
+    pub noise: NoiseMode,
     pub auto_gain: bool,
     pub sounds: bool,
     /// Громкость участников по id пользователя (identity), 1.0 = 100%.
@@ -59,7 +89,7 @@ impl Default for Settings {
             ptt_enabled: false,
             ptt_key: DEFAULT_PTT_KEY,
             echo_cancellation: true,
-            noise_suppression: true,
+            noise: NoiseMode::default(),
             auto_gain: true,
             sounds: true,
             user_volume: HashMap::new(),

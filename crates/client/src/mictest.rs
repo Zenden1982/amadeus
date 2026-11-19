@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use livekit::webrtc::native::apm::AudioProcessingModule;
 
+use crate::config::NoiseMode;
+use crate::denoise::Processor;
+
 const APM_RATE: u32 = 48_000;
 const CHUNK: usize = (APM_RATE / 100) as usize; // 10 мс
 
@@ -76,7 +79,7 @@ fn find(devices: impl Iterator<Item = cpal::Device>, name: Option<&str>) -> Opti
 pub fn start(
     input_name: Option<&str>,
     output_name: Option<&str>,
-    ns: bool,
+    noise: NoiseMode,
     agc: bool,
     playback: bool,
     level: Arc<AtomicU32>,
@@ -88,7 +91,7 @@ pub fn start(
     let (ready2, error2) = (ready.clone(), error.clone());
     let spawned = std::thread::Builder::new().name("amadeus-mictest".into()).spawn(move || {
         let t0 = std::time::Instant::now();
-        match open(input_name.as_deref(), output_name.as_deref(), ns, agc, playback, level) {
+        match open(input_name.as_deref(), output_name.as_deref(), noise, agc, playback, level) {
             Ok(streams) => {
                 log::info!("проверка микрофона: запущена за {} мс", t0.elapsed().as_millis());
                 ready2.store(true, Ordering::Relaxed);
@@ -110,7 +113,7 @@ pub fn start(
 fn open(
     input_name: Option<&str>,
     output_name: Option<&str>,
-    ns: bool,
+    noise: NoiseMode,
     agc: bool,
     playback: bool,
     level: Arc<AtomicU32>,
@@ -167,7 +170,9 @@ fn open(
         out_stream = Some(stream);
     }
 
-    let mut apm = SendApm(AudioProcessingModule::new(false, agc, true, ns));
+    let mut apm = SendApm(AudioProcessingModule::new(false, agc, true, noise == NoiseMode::Standard));
+    let mut denoiser = Processor::new(noise);
+    let mut fbuf = [0f32; CHUNK];
     let mut to48 = Resampler::new(in_cfg.sample_rate, APM_RATE);
     let mut to_out = Resampler::new(APM_RATE, out_rate);
     let mut buf48: Vec<f32> = Vec::with_capacity(CHUNK * 4);
@@ -189,6 +194,16 @@ fn open(
                         *d = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     }
                     let _ = apm.0.process_stream(&mut chunk, APM_RATE as i32, 1);
+                    // Как в звонке: RNNoise после APM (кадр 10 мс на 48 кГц = кадр RNNoise).
+                    if let Some(d) = &mut denoiser {
+                        for (f, &s) in fbuf.iter_mut().zip(chunk.iter()) {
+                            *f = s as f32;
+                        }
+                        d.process(&mut fbuf);
+                        for (s, &f) in chunk.iter_mut().zip(fbuf.iter()) {
+                            *s = f.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                        }
+                    }
                     let rms = (chunk.iter().map(|&s| (s as f32 / i16::MAX as f32).powi(2)).sum::<f32>() / CHUNK as f32).sqrt();
                     // ~0.25 rms — громкая речь; шкала как у audio_level LiveKit (0..1)
                     let lvl = (rms * 4.0).min(1.0);

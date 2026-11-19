@@ -36,6 +36,7 @@
 #include "api/audio/audio_device.h"
 #include "api/audio_options.h"
 #include "livekit/adm_proxy.h"
+#include "livekit/amadeus_audio.h"  // Amadeus patch
 #include "livekit/audio_track.h"
 #include "livekit/peer_connection.h"
 #include "livekit/rtc_error.h"
@@ -194,7 +195,12 @@ PeerConnectionFactory::PeerConnectionFactory(
       std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
   dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
   dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-  dependencies.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+  // Amadeus patch: свой постпроцессор захвата (нейросетевой шумодав в Rust).
+  {
+    auto apb = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+    apb->SetCapturePostProcessing(livekit_ffi::amadeus_capture_post_processing());
+    dependencies.audio_processing_builder = std::move(apb);
+  }
 
   webrtc::EnableMedia(dependencies);
   peer_factory_ =
@@ -249,9 +255,12 @@ std::shared_ptr<AudioTrack> PeerConnectionFactory::create_device_audio_track(
     rust::String label) const {
   // Create an audio source that uses the ADM for capture
   webrtc::AudioOptions audio_options;
-  audio_options.echo_cancellation = true;
-  audio_options.auto_gain_control = true;
-  audio_options.noise_suppression = true;
+  // Amadeus patch: было жёстко true/true/true — переключатели в клиенте не действовали.
+  const int flags = livekit_ffi::amadeus_device_audio_flags();
+  audio_options.echo_cancellation = (flags & AMADEUS_AUDIO_EC) != 0;
+  audio_options.auto_gain_control = (flags & AMADEUS_AUDIO_AGC) != 0;
+  audio_options.noise_suppression = (flags & AMADEUS_AUDIO_NS) != 0;
+  audio_options.highpass_filter = (flags & AMADEUS_AUDIO_HPF) != 0;
 
   webrtc::scoped_refptr<webrtc::AudioSourceInterface> audio_source =
       peer_factory_->CreateAudioSource(audio_options);

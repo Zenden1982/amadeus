@@ -33,6 +33,13 @@ capture-win = { path = "../capture-win" }
 msvc-shim = { path = "../msvc-shim" }
 # rustls-tls-native-roots: нужен для WSS через HTTP-прокси (HTTPS_PROXY, напр. v2rayN); корни — из хранилища Windows.
 livekit = { version = "0.11.0", features = ["rustls-tls-native-roots"] }
+# Патч vendor/webrtc-sys: флаги обработки микрофона и колбэк захвата (vendor/PATCHES.md).
+webrtc-sys = "0.3.54"
+# Нейросетевой шумодав RNNoise (чистый Rust, 48 кГц, кадры по 10 мс).
+nnnoiseless = { version = "0.5", default-features = false }
+# DeepFilterNet3 (модель встроена, tract — чистый Rust): основной шумодав.
+deep-filter-rt = "0.2"
+ndarray = "0.17"
 eframe = "0.36"
 egui-phosphor = { version = "0.14", features = ["regular", "fill"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

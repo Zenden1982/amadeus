@@ -5,6 +5,7 @@ mod api;
 mod app;
 mod chat;
 mod config;
+mod denoise;
 mod desktop;
 mod frame;
 mod metrics;

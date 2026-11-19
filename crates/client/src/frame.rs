@@ -19,6 +19,41 @@ const CORNER: f32 = 12.0;
 const LAMP_R: f32 = 6.5;
 const BEZEL_R: f32 = 8.5;
 
+/// HWND главного окна (для смены оформления DWM на полном экране).
+#[cfg(windows)]
+static HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Цвет тонкой рамки DWM (COLORREF = 0x00BBGGRR).
+#[cfg(windows)]
+fn border_colorref() -> u32 {
+    let c = t::BORDER_DIM;
+    (c.b() as u32) << 16 | (c.g() as u32) << 8 | c.r() as u32
+}
+
+/// Полный экран: без скругления углов и рамки DWM (иначе по краю кадра остаётся светлая линия), обратно — как было.
+pub fn set_fullscreen_style(on: bool) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{
+            DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
+            DwmSetWindowAttribute,
+        };
+        let hwnd = HWND.load(std::sync::atomic::Ordering::Relaxed);
+        if hwnd == 0 {
+            return;
+        }
+        let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+        let corner: i32 = if on { DWMWCP_DONOTROUND } else { DWMWCP_ROUND };
+        let border: u32 = if on { DWMWA_COLOR_NONE } else { border_colorref() };
+        unsafe {
+            DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&corner as *const i32).cast(), 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&border as *const u32).cast(), 4);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = on;
+}
+
 /// Скругление углов Win11 и цвет тонкой рамки DWM (на Win10 вызовы просто не действуют).
 pub fn style_native_window(cc: &eframe::CreationContext<'_>) {
     #[cfg(windows)]
@@ -29,11 +64,10 @@ pub fn style_native_window(cc: &eframe::CreationContext<'_>) {
         };
         let Ok(handle) = cc.window_handle() else { return };
         let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+        HWND.store(h.hwnd.get(), std::sync::atomic::Ordering::Relaxed);
         let hwnd = h.hwnd.get() as windows_sys::Win32::Foundation::HWND;
         let corner: i32 = DWMWCP_ROUND;
-        let c = t::BORDER_DIM;
-        // COLORREF = 0x00BBGGRR
-        let border: u32 = (c.b() as u32) << 16 | (c.g() as u32) << 8 | c.r() as u32;
+        let border = border_colorref();
         unsafe {
             DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&corner as *const i32).cast(), 4);
             DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&border as *const u32).cast(), 4);

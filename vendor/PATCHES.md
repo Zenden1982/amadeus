@@ -15,6 +15,20 @@
 
 Все места помечены комментарием `Amadeus patch`.
 
+## Обработка микрофона: флаги AudioOptions и колбэк захвата (2026-11-19)
+В SDK `create_device_audio_track` создавал микрофонный источник с жёстко включёнными AEC+AGC+NS WebRTC, а
+`PlatformAudio::configure_audio_processing` переключает только **аппаратную** обработку — переключатели клиента
+на программный APM не действовали (NS WebRTC оставался всегда, голос «глухой»).
+
+- `webrtc-sys/include/livekit/amadeus_audio.h`, `webrtc-sys/src/amadeus_audio.cpp` (новые, добавлены в `build.rs`):
+  - `amadeus_set_device_audio_flags(flags)` — EC/AGC/NS/HPF для микрофонных треков, созданных **после** вызова;
+  - `amadeus_set_capture_hook(fn)` — колбэк на каждый 10-мс блок захвата: `CustomProcessing`, поставленный в APM через
+    `BuiltinAudioProcessingBuilder::SetCapturePostProcessing` (после AEC/NS, на полной полосе 48 кГц, float в шкале int16).
+- `webrtc-sys/src/peer_connection_factory.cpp` — APM строится с этим постпроцессором; `create_device_audio_track`
+  берёт AudioOptions из флагов.
+- `webrtc-sys/src/amadeus.rs` + `pub mod amadeus` в `lib.rs` — Rust-обёртки (обычный `extern "C"`, не cxx).
+- Клиент: `crates/client/src/denoise.rs` (DeepFilterNet3 / RNNoise в колбэке), `voice.rs::apply_processing`.
+
 ## Удалено из webrtc-sys
 - `src/lazy_load_deps_for/` (4,6 МБ) — нужен только для Linux-сборки desktop_capturer. Для сборки под Linux вернуть
   из оригинального крейта.

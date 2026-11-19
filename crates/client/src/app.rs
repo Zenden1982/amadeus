@@ -15,7 +15,7 @@ use proto::{AuthResponse, Channel, ChannelKind, Invite, User};
 
 use crate::api::{self, Api, ApiError, ApiResult};
 use crate::chat::Chat;
-use crate::config::Settings;
+use crate::config::{NoiseMode, Settings};
 use crate::desktop::{self, Window};
 use crate::tray::Tray;
 use crate::update::{self, Updater};
@@ -28,7 +28,7 @@ use crate::video::VideoHub;
 use crate::voice::{self, AudioPrefs, Cmd, Conn, Peer, VoiceHandle, VoiceState};
 
 /// (микрофон, вывод, шумоподавление, автогромкость, слышать себя).
-type MicTestKey = (Option<String>, Option<String>, bool, bool, bool);
+type MicTestKey = (Option<String>, Option<String>, NoiseMode, bool, bool);
 
 const CHANNELS_REFRESH: Duration = Duration::from_secs(60);
 
@@ -104,7 +104,7 @@ pub struct App {
     invite: Option<Result<Invite, String>>,
     invite_busy: bool,
     mic_test: Option<MicTest>,
-    /// Параметры, с которыми запущена проверка: (микрофон, вывод, ns, agc, слышать себя).
+    /// Параметры, с которыми запущена проверка: (микрофон, вывод, шумодав, agc, слышать себя).
     mic_test_key: Option<MicTestKey>,
     mic_test_error: Option<String>,
     mic_level: Arc<AtomicU32>,
@@ -165,7 +165,7 @@ impl App {
             input: settings.input_device.clone(),
             output: settings.output_device.clone(),
             aec: settings.echo_cancellation,
-            ns: settings.noise_suppression,
+            noise: settings.noise,
             agc: settings.auto_gain,
             ptt_enabled: settings.ptt_enabled,
             sounds: settings.sounds,
@@ -1283,6 +1283,7 @@ impl App {
         if self.fullscreen != on {
             self.fullscreen = on;
             self.pointer_moved_at = Instant::now();
+            crate::frame::set_fullscreen_style(on);
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
         }
     }
@@ -1367,6 +1368,10 @@ impl App {
             self.pointer_moved_at = Instant::now();
         }
         let idle = self.pointer_moved_at.elapsed() > Duration::from_millis(2500);
+        // Чёрным — всё окно, а не только панель: при дробном масштабе (125 %, 150 %) и пока окно меняет размер
+        // край панели может не дойти до края экрана, и снизу оставалась полоса фона.
+        let ctx = ui.ctx().clone();
+        ctx.layer_painter(egui::LayerId::background()).rect_filled(ctx.viewport_rect().expand(4.0), 0.0, Color32::BLACK);
         egui::CentralPanel::no_frame().frame(Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
             let r = ui.max_rect();
             let resp = ui.interact(r, Id::new("fs-video"), Sense::click());
@@ -1636,7 +1641,7 @@ impl App {
         let key = (
             name_of(&self.settings.input_device, &vs.inputs),
             name_of(&self.settings.output_device, &vs.outputs),
-            self.settings.noise_suppression,
+            self.settings.noise,
             self.settings.auto_gain,
             self.mic_playback,
         );
@@ -2028,9 +2033,26 @@ impl App {
                         }
                     });
                     let mut proc_changed = false;
+                    toggle_row(ui, w, |ui| {
+                        ui.label("Шумоподавление").on_hover_text(
+                            "Нейросеть (DeepFilterNet) убирает шум и шипение (клавиатура, вентилятор, улица) и не режет высокие частоты.\n\
+                             Лёгкая (RNNoise) — дешевле для слабых ПК, но шипение почти не убирает.\n\
+                             Обычное — шумодав WebRTC: голос глуше. Выключено — для хорошего микрофона в тихой комнате.",
+                        );
+                    }, |ui| {
+                        let mut mode = self.settings.noise;
+                        egui::ComboBox::from_id_salt("noise-mode").selected_text(mode.label()).width(190.0).show_ui(ui, |ui| {
+                            for m in NoiseMode::ALL {
+                                ui.selectable_value(&mut mode, m, m.label());
+                            }
+                        });
+                        if mode != self.settings.noise {
+                            self.settings.noise = mode;
+                            proc_changed = true;
+                        }
+                    });
                     for (text, val) in [
-                        ("Эхоподавление", &mut self.settings.echo_cancellation),
-                        ("Шумоподавление", &mut self.settings.noise_suppression),
+                        ("Эхоподавление (выключите в наушниках — звук чище)", &mut self.settings.echo_cancellation),
                         ("Автоматическая громкость микрофона", &mut self.settings.auto_gain),
                     ] {
                         toggle_row(ui, w, |ui| {
@@ -2045,7 +2067,7 @@ impl App {
                         self.settings.save();
                         self.voice.send(Cmd::SetProcessing {
                             aec: self.settings.echo_cancellation,
-                            ns: self.settings.noise_suppression,
+                            noise: self.settings.noise,
                             agc: self.settings.auto_gain,
                         });
                     }
@@ -2228,6 +2250,10 @@ impl eframe::App for App {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // Полный экран — чёрный фон под видео (иначе непокрытый край окна виден полосой цвета интерфейса).
+        if self.fullscreen {
+            return Color32::BLACK.to_normalized_gamma_f32();
+        }
         t::BG.to_normalized_gamma_f32()
     }
 }
