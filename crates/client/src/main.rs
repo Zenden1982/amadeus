@@ -8,6 +8,8 @@ mod config;
 mod denoise;
 mod desktop;
 mod frame;
+#[cfg(debug_assertions)]
+mod gallery;
 mod kit;
 mod metrics;
 mod mictest;

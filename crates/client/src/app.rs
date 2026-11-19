@@ -150,6 +150,8 @@ pub struct App {
     hide_until: Option<Instant>,
     /// Демо-режим без сервера (только debug, AMADEUS_DEMO).
     demo: bool,
+    #[cfg(debug_assertions)]
+    gallery: crate::gallery::GalleryState,
 }
 
 impl App {
@@ -263,6 +265,8 @@ impl App {
             autostart_error,
             hide_until: None,
             demo: false,
+            #[cfg(debug_assertions)]
+            gallery: Default::default(),
         };
         if app.tray.is_some() && std::env::args().any(|a| a == desktop::ARG_TRAY) {
             // eframe показывает окно после первого кадра; свёрнутое — покажется только в панели задач,
@@ -2273,6 +2277,23 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // Отладка: AMADEUS_GALLERY=1 — только витрина набора деталей.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("AMADEUS_GALLERY").is_some() {
+            if !std::ptr::eq(t::resolve(self.settings.theme, ui.ctx().system_theme()), t::p()) {
+                t::set_theme(ui.ctx(), self.settings.theme);
+            }
+            static SIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SIZED.swap(true, Ordering::Relaxed) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(1240.0, 960.0)));
+            }
+            crate::frame::title_bar(ui, None);
+            let mut theme = self.settings.theme;
+            crate::gallery::ui(ui, &mut self.gallery, &mut theme);
+            self.settings.theme = theme;
+            crate::frame::resize_edges(ui.ctx());
+            return;
+        }
         // Тема: «Как в Windows» следит за системой на лету.
         if !std::ptr::eq(t::resolve(self.settings.theme, ui.ctx().system_theme()), t::p()) {
             t::set_theme(ui.ctx(), self.settings.theme);

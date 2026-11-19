@@ -30,7 +30,7 @@ fn colors(kind: ButtonKind, hover: f32, enabled: bool) -> (Color32, Color32) {
 
 fn pill(ui: &mut Ui, kind: ButtonKind, text: &str, icon: Option<&str>, width: Option<f32>, height: f32, enabled: bool) -> Response {
     let font = t::bold(14.5);
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER);
     let icon_w = if icon.is_some() { 18.0 + 8.0 } else { 0.0 };
     let content_w = icon_w + galley.size().x;
     let w = width.unwrap_or(content_w + 2.0 * 18.0);
@@ -98,7 +98,7 @@ pub enum DockStyle {
 
 /// Кнопка дока: иконка + подпись, «таблетка» высотой 46.
 pub fn dock_button(ui: &mut Ui, icon: &str, label: &str, style: DockStyle) -> Response {
-    let galley = ui.painter().layout_no_wrap(label.to_string(), t::bold(14.0), Color32::WHITE);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), t::bold(14.0), Color32::PLACEHOLDER);
     let w = 18.0 + 20.0 + 9.0 + galley.size().x + 20.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), HOVER_S);
