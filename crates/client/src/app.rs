@@ -1815,7 +1815,6 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    /// Окно «Доступно обновление».
     /// Окно перехода: старая установка Amadeus получила Murmur автообновлением — нужен новый установщик.
     fn ui_legacy(&mut self, ui: &mut Ui) {
         let mut later = false;
@@ -1850,6 +1849,7 @@ impl App {
         }
     }
 
+    /// Окно «Доступно обновление».
     fn ui_update(&mut self, ui: &mut Ui) {
         let Some(info) = self.updater.available.clone() else {
             self.update_open = false;
@@ -1930,12 +1930,8 @@ impl App {
             ui.label("Тема");
         }, |ui| {
             let mut pref = self.settings.theme;
-            egui::ComboBox::from_id_salt("theme-pref").selected_text(pref.label()).width(190.0).show_ui(ui, |ui| {
-                for v in ThemePref::ALL {
-                    ui.selectable_value(&mut pref, v, v.label());
-                }
-            });
-            if pref != self.settings.theme {
+            let items: Vec<(ThemePref, String)> = ThemePref::ALL.iter().map(|v| (*v, v.label().to_string())).collect();
+            if kit::combo(ui, "theme-pref", &mut pref, &items, 190.0) && pref != self.settings.theme {
                 self.settings.theme = pref;
                 self.settings.save();
                 t::set_theme(ui.ctx(), pref);
@@ -2698,7 +2694,7 @@ fn ping_box(ui: &mut Ui, rtt: f64) {
             });
         })
         .response
-        .on_hover_text("Время до сервера голоса и обратно");
+        .on_hover_text(format!("Время до сервера голоса и обратно: {:.0} мс", rtt * 1000.0));
 }
 
 /// Выпадающий список устройств. Возвращает true, если выбор изменился.

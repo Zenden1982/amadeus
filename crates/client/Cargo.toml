@@ -27,8 +27,8 @@ customLanguageFiles = { Russian = "packaging/nsis/Russian.nsh" }
 installerIcon = "assets/icon.ico"
 # при удалении — галочка «удалить настройки» (по умолчанию выключена); настройки остались в %APPDATA%\Amadeus
 appdataPaths = ["$APPDATA/Amadeus"]
-# Переход со старой установки Amadeus (до Murmur): убрать её exe, ярлык, запись в «Приложениях» и автозапуск.
-# Настройки (%APPDATA%\Amadeus) не трогаем — вход сохраняется. Новый Murmur сам пропишет автозапуск при первом запуске.
+# Переход со старой установки Amadeus (до Murmur): убрать её exe, ярлык, запись в «Приложениях»; автозапуск, если был, —
+# перевести на новую папку. Настройки (%APPDATA%\Amadeus) не трогаем — вход сохраняется.
 preinstallSection = '''
 Section "-RemoveAmadeus"
   ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Amadeus" "InstallLocation"
@@ -49,7 +49,9 @@ Section "-RemoveAmadeus"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Amadeus"
   DeleteRegKey HKCU "Software\Amadeus\Amadeus"
   DeleteRegKey /ifempty HKCU "Software\Amadeus"
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus"
+  ReadRegStr $R3 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus"
+  StrCmp $R3 "" +2
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus" '"$INSTDIR\amadeus.exe" --tray'
   amadeus_done:
 SectionEnd
 '''

@@ -32,6 +32,14 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Доля значения в диапазоне 0..1 (пустой диапазон — 0, без деления на ноль).
+pub fn slider_fraction(value: f32, lo: f32, hi: f32) -> f32 {
+    if hi <= lo {
+        return 0.0;
+    }
+    ((value - lo) / (hi - lo)).clamp(0.0, 1.0)
+}
+
 /// Ползунок: тонкая дорожка, заполнение акцентом, белая ручка с обводкой.
 pub fn slider(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, width: f32) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click_and_drag());
@@ -44,7 +52,7 @@ pub fn slider(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>
             resp.mark_changed();
         }
     }
-    let k = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let k = slider_fraction(*value, lo, hi);
     let track = egui::Rect::from_center_size(rect.center(), vec2(rect.width() - 18.0, 6.0));
     let p = t::p();
     let painter = ui.painter();

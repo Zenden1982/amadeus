@@ -38,6 +38,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slider_fraction_handles_empty_range() {
+        assert_eq!(slider_fraction(1.0, 0.0, 2.0), 0.5);
+        assert_eq!(slider_fraction(5.0, 1.0, 1.0), 0.0, "пустой диапазон — без NaN");
+        assert_eq!(slider_fraction(-1.0, 0.0, 2.0), 0.0);
+    }
+
+    #[test]
     fn tokens_scaled() {
         const { assert!(PAD > 8.0 && GAP > 8.0, "плотность просторнее прежней (8.0)") };
         assert_eq!(R_PILL, 255);

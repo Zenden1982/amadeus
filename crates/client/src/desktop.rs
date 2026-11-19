@@ -262,7 +262,6 @@ pub fn open_url(url: &str) {
     let _ = url;
 }
 
-/// Путь к своему exe.
 /// Строковое значение реестра HKCU (только Windows).
 pub fn hkcu_string(key: &str, value: &str) -> Option<String> {
     #[cfg(windows)]
@@ -289,6 +288,7 @@ pub fn run_file(path: &Path) -> bool {
     }
 }
 
+/// Путь к своему exe.
 pub fn current_exe() -> Option<PathBuf> {
     std::env::current_exe().ok().map(|p| dunce_simplify(&p))
 }

@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 
 VERSION="${1:?версия}"
 NOTES="${2:-}"
-REPO="${GH_REPO:-Zenden1982/amadeus}"
+REPO="${GH_REPO:-Zenden1982/murmur}"
 SETUP="dist/$VERSION/murmur-setup-$VERSION.exe"
 [[ -f "$SETUP" ]] || { echo "нет $SETUP"; exit 1; }
 

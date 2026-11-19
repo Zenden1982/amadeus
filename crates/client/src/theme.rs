@@ -134,6 +134,8 @@ pub fn set_theme(ctx: &egui::Context, pref: crate::config::ThemePref) {
     CURRENT.store(light as u8, std::sync::atomic::Ordering::Relaxed);
     ctx.set_theme(if light { egui::Theme::Light } else { egui::Theme::Dark });
     apply_visuals(ctx, pal);
+    // уже нарисованная часть кадра — в старой палитре: перерисовать целиком
+    ctx.request_repaint();
 }
 
 /// Подложка подписей и кнопок поверх видео (видео тёмное в обеих темах).
