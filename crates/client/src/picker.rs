@@ -167,7 +167,7 @@ impl Picker {
                 let p = ui.painter();
                 let fill = if on { t::p().accent_soft } else if resp.hovered() { t::p().row_hover } else { t::p().surface_3 };
                 p.rect(rect, CornerRadius::same(255), fill, Stroke::NONE, StrokeKind::Inside);
-                p.galley(rect.center() - galley.size() / 2.0, galley, if on { t::p().accent } else { t::p().text_muted });
+                p.galley(rect.center() - galley.size() / 2.0, galley, if on { t::p().accent_text } else { t::p().text_muted });
                 if resp.clicked() {
                     self.tab = tab;
                 }

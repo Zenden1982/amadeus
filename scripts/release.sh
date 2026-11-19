@@ -19,6 +19,8 @@ VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Carg
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "не понял версию: '$VERSION'"; exit 1; }
 echo "== Murmur $VERSION"
 
+# старые установщики этой же версии (в т.ч. amadeus_…) убрать, чтобы ниже взять ровно свежесобранный
+rm -f target/release/*_"${VERSION}"_x64-setup.exe
 cargo packager -p client --release
 
 OUT="dist/$VERSION"
@@ -27,7 +29,9 @@ EXE="amadeus-$VERSION.exe"
 SETUP="murmur-setup-$VERSION.exe"
 cp target/release/amadeus.exe "$OUT/$EXE"
 # cargo-packager называет установщик по productName (раньше amadeus_…, теперь murmur_…/Murmur_…)
-BUILT=$(ls target/release/*_"${VERSION}"_x64-setup.exe | head -1)
+mapfile -t BUILT_ALL < <(compgen -G "target/release/*_${VERSION}_x64-setup.exe" || true)
+[[ ${#BUILT_ALL[@]} -eq 1 ]] || { echo "ожидался ровно один установщик ${VERSION}, найдено: ${BUILT_ALL[*]:-ничего}"; exit 1; }
+BUILT="${BUILT_ALL[0]}"
 cp "$BUILT" "$OUT/$SETUP"
 gzip -kf9 "$OUT/$EXE"   # сервер отдаёт .gz клиентам с Accept-Encoding: gzip (~в 3 раза меньше)
 

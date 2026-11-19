@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Релиз на GitHub с установщиком: тег v<версия> на текущий коммит (он должен быть запушен) + amadeus-setup-<версия>.exe.
+# Релиз на GitHub с установщиком: тег v<версия> на текущий коммит (он должен быть запушен) + murmur-setup-<версия>.exe.
 #
 #   scripts/gh-release.sh <версия> "Что нового"
 #
@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 VERSION="${1:?версия}"
 NOTES="${2:-}"
 REPO="${GH_REPO:-Zenden1982/amadeus}"
-SETUP="dist/$VERSION/amadeus-setup-$VERSION.exe"
+SETUP="dist/$VERSION/murmur-setup-$VERSION.exe"
 [[ -f "$SETUP" ]] || { echo "нет $SETUP"; exit 1; }
 
 GH=$(command -v gh || true)
@@ -29,7 +29,7 @@ else
     git branch -r --contains "$SHA" | grep -q . || { echo "коммит $SHA не запушен"; exit 1; }
     BODY="${NOTES:+$NOTES
 
-}Установка: скачайте amadeus-setup-$VERSION.exe и запустите (права администратора не нужны). Уже установленный Amadeus обновится сам."
-    "$GH" release create "v$VERSION" "$SETUP" -R "$REPO" --target "$SHA" --title "Amadeus $VERSION" --notes "$BODY"
+}Установка: скачайте murmur-setup-$VERSION.exe и запустите (права администратора не нужны). Если стоит старый Amadeus — установщик сам его заменит, вход и настройки сохранятся."
+    "$GH" release create "v$VERSION" "$SETUP" -R "$REPO" --target "$SHA" --title "Murmur $VERSION" --notes "$BODY"
 fi
 echo "== https://github.com/$REPO/releases/tag/v$VERSION"

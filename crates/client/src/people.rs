@@ -157,8 +157,13 @@ impl People {
     /// Аватар: картинка в круге, а пока её нет (или нет вовсе) — буква на цветном круге.
     pub fn paint(&self, painter: &egui::Painter, center: Pos2, r: f32, u: &PublicUser, glow: f32, dim: bool) {
         let tex = u.avatar.as_deref().and_then(|k| self.texture(k));
-        paint_avatar(painter, center, r, u.shown_name(), tex.as_ref(), glow, dim);
+        paint_avatar(painter, center, r, avatar_name(u), tex.as_ref(), glow, dim);
     }
+}
+
+/// Имя, по которому рисуется аватар (буква и цвет) — везде одно: отображаемое, иначе логин.
+pub fn avatar_name(u: &PublicUser) -> &str {
+    u.shown_name()
 }
 
 pub fn paint_avatar(painter: &egui::Painter, center: Pos2, r: f32, name: &str, tex: Option<&TextureHandle>, glow: f32, dim: bool) {
@@ -228,5 +233,18 @@ mod tests {
     #[test]
     fn not_an_image() {
         assert!(prepare_upload(b"hello").is_err());
+    }
+}
+
+#[cfg(test)]
+mod avatar_name_tests {
+    use super::avatar_name;
+
+    #[test]
+    fn avatar_letter_from_shown_name() {
+        let u = proto::PublicUser { id: 1, name: "kurigohan".into(), display_name: Some("Окабе".into()), avatar: None };
+        assert_eq!(avatar_name(&u), "Окабе", "буква и цвет — по отображаемому имени, как в списке");
+        let u = proto::PublicUser { display_name: None, ..u };
+        assert_eq!(avatar_name(&u), "kurigohan");
     }
 }

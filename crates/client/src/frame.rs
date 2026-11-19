@@ -19,10 +19,9 @@ const CORNER: f32 = 12.0;
 #[cfg(windows)]
 static HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-/// Цвет тонкой рамки DWM (COLORREF = 0x00BBGGRR).
-#[cfg(windows)]
-fn border_colorref() -> u32 {
-    let c = t::p().border;
+/// Цвет тонкой рамки DWM (COLORREF = 0x00BBGGRR) для палитры.
+fn border_colorref(p: &t::Palette) -> u32 {
+    let c = p.border;
     (c.b() as u32) << 16 | (c.g() as u32) << 8 | c.r() as u32
 }
 
@@ -40,7 +39,7 @@ pub fn set_fullscreen_style(on: bool) {
         }
         let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
         let corner: i32 = if on { DWMWCP_DONOTROUND } else { DWMWCP_ROUND };
-        let border: u32 = if on { DWMWA_COLOR_NONE } else { border_colorref() };
+        let border: u32 = if on { DWMWA_COLOR_NONE } else { border_colorref(t::p()) };
         unsafe {
             DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&corner as *const i32).cast(), 4);
             DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&border as *const u32).cast(), 4);
@@ -48,6 +47,22 @@ pub fn set_fullscreen_style(on: bool) {
     }
     #[cfg(not(windows))]
     let _ = on;
+}
+
+/// Перекрасить рамку окна под текущую тему (вызывать при смене темы; на полном экране рамки нет).
+pub fn apply_border() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DwmSetWindowAttribute};
+        let hwnd = HWND.load(std::sync::atomic::Ordering::Relaxed);
+        if hwnd == 0 {
+            return;
+        }
+        let border = border_colorref(t::p());
+        unsafe {
+            DwmSetWindowAttribute(hwnd as windows_sys::Win32::Foundation::HWND, DWMWA_BORDER_COLOR as u32, (&border as *const u32).cast(), 4);
+        }
+    }
 }
 
 /// Скругление углов Win11 и цвет тонкой рамки DWM (на Win10 вызовы просто не действуют).
@@ -63,7 +78,7 @@ pub fn style_native_window(cc: &eframe::CreationContext<'_>) {
         HWND.store(h.hwnd.get(), std::sync::atomic::Ordering::Relaxed);
         let hwnd = h.hwnd.get() as windows_sys::Win32::Foundation::HWND;
         let corner: i32 = DWMWCP_ROUND;
-        let border = border_colorref();
+        let border = border_colorref(t::p());
         unsafe {
             DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&corner as *const i32).cast(), 4);
             DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&border as *const u32).cast(), 4);
@@ -162,7 +177,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
                 let galley = ui.painter().layout_no_wrap(
                     format!("{}  {text}", egui_phosphor::regular::ARROW_CIRCLE_UP),
                     t::bold(12.5),
-                    t::p().accent,
+                    t::p().accent_text,
                 );
                 let size = vec2(galley.size().x + 20.0, 22.0);
                 let rect = Rect::from_min_size(pos2(minb.left() - 12.0 - size.x, r.center().y - size.y / 2.0), size);
@@ -170,7 +185,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
                 let lit = ctx.animate_bool_with_time(Id::new("titlebar-badge-lit"), resp.hovered(), 0.12);
                 let p = ui.painter();
                 p.rect_filled(rect, CornerRadius::same(255), t::p().accent_soft.lerp_to_gamma(t::p().accent.gamma_multiply(0.3), lit));
-                p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::p().accent);
+                p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::p().accent_text);
                 if resp.on_hover_text("Скачать и перезапустить").clicked() {
                     badge_clicked = true;
                 }
@@ -203,7 +218,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
                 if resp.is_pointer_button_down_on() {
                     lit *= 0.85;
                 }
-                let (bg, fg) = btn_colors(kind, lit);
+                let (bg, fg) = btn_colors(t::p(), kind, lit);
                 p.rect_filled(rect, CornerRadius::ZERO, bg);
                 draw_icon(p, rect.center(), kind, max, fg);
                 let tip = match kind {
@@ -245,8 +260,7 @@ fn forced_focus() -> bool {
 }
 
 /// Цвета кнопки рамки: `lit` 0..1 — наведение. «Закрыть» — красная подложка и белый значок.
-fn btn_colors(kind: Btn, lit: f32) -> (Color32, Color32) {
-    let p = t::p();
+fn btn_colors(p: &t::Palette, kind: Btn, lit: f32) -> (Color32, Color32) {
     let lit = lit.clamp(0.0, 1.0);
     let on = if kind == Btn::Close { p.danger } else { p.row_hover };
     let bg = Color32::TRANSPARENT.lerp_to_gamma(on, lit);
@@ -298,16 +312,27 @@ mod tests {
 
     #[test]
     fn button_colors_states() {
-        for k in [Btn::Min, Btn::Max, Btn::Close] {
-            let (bg, fg) = btn_colors(k, 0.0);
-            assert_eq!(bg.a(), 0, "без наведения подложки нет");
-            assert_eq!(fg, t::p().text_muted);
-            let (bg, fg) = btn_colors(k, 1.0);
-            if k == Btn::Close {
-                assert_eq!((bg, fg), (t::p().danger, Color32::WHITE));
-            } else {
-                assert_eq!((bg, fg), (t::p().row_hover, t::p().text));
+        // палитра передаётся явно: другие тесты переключают общую тему параллельно
+        for p in [&t::DARK, &t::LIGHT] {
+            for k in [Btn::Min, Btn::Max, Btn::Close] {
+                let (bg, fg) = btn_colors(p, k, 0.0);
+                assert_eq!(bg.a(), 0, "без наведения подложки нет");
+                assert_eq!(fg, p.text_muted);
+                let (bg, fg) = btn_colors(p, k, 1.0);
+                if k == Btn::Close {
+                    assert_eq!((bg, fg), (p.danger, Color32::WHITE));
+                } else {
+                    assert_eq!((bg, fg), (p.row_hover, p.text));
+                }
             }
         }
+    }
+
+    #[test]
+    fn border_follows_palette() {
+        let (d, l) = (border_colorref(&t::DARK), border_colorref(&t::LIGHT));
+        assert_ne!(d, l, "у светлой темы своя рамка окна");
+        let c = t::LIGHT.border;
+        assert_eq!(l, (c.b() as u32) << 16 | (c.g() as u32) << 8 | c.r() as u32);
     }
 }

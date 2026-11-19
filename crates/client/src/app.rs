@@ -1939,6 +1939,7 @@ impl App {
                 self.settings.theme = pref;
                 self.settings.save();
                 t::set_theme(ui.ctx(), pref);
+                crate::frame::apply_border();
             }
         });
         let installed = desktop::is_installed();
@@ -1976,7 +1977,7 @@ impl App {
             let status = if u.checking {
                 RichText::new("проверяю…").color(t::p().text_muted)
             } else if let Some(i) = &u.available {
-                RichText::new(format!("доступна {}", i.version)).color(t::p().accent)
+                RichText::new(format!("доступна {}", i.version)).color(t::p().accent_text)
             } else if let Some(e) = &u.error {
                 RichText::new(e.clone()).color(t::p().danger_text)
             } else if u.checked_once {
@@ -2169,7 +2170,7 @@ impl App {
                             if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
                                 self.ptt.cancel_capture();
                             }
-                            ui.label(RichText::new("нажмите клавишу…").color(t::p().accent).size(13.0));
+                            ui.label(RichText::new("нажмите клавишу…").color(t::p().accent_text).size(13.0));
                         } else {
                             let r = kit::keycap(ui, &ptt::key_name(self.settings.ptt_key)).interact(Sense::click());
                             if r.on_hover_text("Нажмите, чтобы назначить другую клавишу (можно кнопку мыши)").clicked() {
@@ -2259,7 +2260,7 @@ impl App {
                                 Some(Ok(inv)) => {
                                     let code = inv.code.clone();
                                     let (rect, _) = ui.allocate_exact_size(vec2(230.0, 34.0), Sense::hover());
-                                    ui.painter().text(rect.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &code, t::xbold(22.0), t::p().accent);
+                                    ui.painter().text(rect.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &code, t::xbold(22.0), t::p().accent_text);
                                     if kit::icon_button(ui, ph::COPY, kit::IconState::Normal, "Скопировать").clicked() {
                                         ui.ctx().copy_text(code);
                                     }
@@ -2366,6 +2367,9 @@ impl eframe::App for App {
         // Тема: «Как в Windows» следит за системой на лету.
         if !std::ptr::eq(t::resolve(self.settings.theme, ui.ctx().system_theme()), t::p()) {
             t::set_theme(ui.ctx(), self.settings.theme);
+            if !self.fullscreen {
+                crate::frame::apply_border();
+            }
         }
         self.handle_msgs();
         self.chat.poll();
@@ -2597,7 +2601,7 @@ fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32, people: &People) {
     let u = peer_user(people, p);
     let badge = if p.mic_muted { kit::PeerBadge::MicOff } else { kit::PeerBadge::None };
     kit::peer_tile(ui, rect, &kit::PeerTile {
-        who: kit::AvatarInput { name: &u.name, texture: people.texture_of(&u) },
+        who: kit::AvatarInput { name: people::avatar_name(&u), texture: people.texture_of(&u) },
         name: u.shown_name(),
         speaking: glow,
         badge,
@@ -2624,7 +2628,7 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
                     ui.label(RichText::new(format!("{:.0} к/с · {:.1} Мбит/с", s.fps, s.kbps / 1000.0)).size(12.5).color(t::p().text_muted));
                 }
                 // Чем кодируется — видно сразу, без наведения.
-                let (tag, color) = if s.backend.contains("видеокарта") { ("видеокарта", t::p().accent) } else { ("процессор", t::p().text_muted) };
+                let (tag, color) = if s.backend.contains("видеокарта") { ("видеокарта", t::p().accent_text) } else { ("процессор", t::p().text_muted) };
                 ui.label(RichText::new(tag).size(12.0).color(color));
                 match &s.audio {
                     voice::AudioStatus::On(_) => {

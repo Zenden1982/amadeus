@@ -21,6 +21,8 @@ pub struct Palette {
     pub accent: Color32,
     pub accent_hover: Color32,
     pub accent_soft: Color32,
+    /// Акцент для мелкого текста (ссылки, «доступна версия», бейдж) — читаемый на фоне (≥ 4.5:1).
+    pub accent_text: Color32,
     pub on_accent: Color32,
     pub speaking: Color32,
     pub danger: Color32,
@@ -53,6 +55,7 @@ pub static DARK: Palette = Palette {
     accent: Color32::from_rgb(0x5B, 0x8C, 0xFF),
     accent_hover: Color32::from_rgb(0x7A, 0xA2, 0xFF),
     accent_soft: Color32::from_rgba_unmultiplied_const(0x5B, 0x8C, 0xFF, 40),
+    accent_text: Color32::from_rgb(0x8F, 0xB0, 0xFF),
     on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     speaking: Color32::from_rgb(0x3D, 0xD6, 0x8C),
     danger: Color32::from_rgb(0xE5, 0x48, 0x4D),
@@ -85,6 +88,7 @@ pub static LIGHT: Palette = Palette {
     accent: Color32::from_rgb(0x5B, 0x8C, 0xFF),
     accent_hover: Color32::from_rgb(0x4A, 0x7B, 0xF7),
     accent_soft: Color32::from_rgba_unmultiplied_const(0x5B, 0x8C, 0xFF, 36),
+    accent_text: Color32::from_rgb(0x2F, 0x5F, 0xD8),
     on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     speaking: Color32::from_rgb(0x1F, 0xAF, 0x6B),
     danger: Color32::from_rgb(0xE5, 0x48, 0x4D),
@@ -361,6 +365,15 @@ mod tests {
             assert!(contrast(p.on_accent, p.accent) >= 3.0, "{name}: on_accent/accent {}", contrast(p.on_accent, p.accent));
             assert!(contrast(p.text_muted, p.surface) >= 3.0, "{name}: muted/surface");
             assert!(contrast(p.danger_text, p.error_bg) >= 4.5, "{name}: danger_text/error_bg");
+        }
+    }
+
+    #[test]
+    fn accent_text_readable() {
+        for (name, p) in [("dark", &DARK), ("light", &LIGHT)] {
+            for (bg_name, bg) in [("bg", p.bg), ("surface", p.surface), ("title_bg", p.title_bg), ("surface_2", p.surface_2)] {
+                assert!(contrast(p.accent_text, bg) >= 4.5, "{name}: accent_text/{bg_name} {}", contrast(p.accent_text, bg));
+            }
         }
     }
 
