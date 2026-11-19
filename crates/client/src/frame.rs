@@ -10,14 +10,10 @@ use eframe::egui::{
 use crate::theme as t;
 
 pub const HEIGHT: f32 = 34.0;
-const BTN_W: f32 = 34.0;
+const BTN_W: f32 = 46.0;
 /// Толщина зоны ресайза у края окна (и больше — в углах).
 const EDGE: f32 = 5.0;
 const CORNER: f32 = 12.0;
-/// Погашенная лампа — тёмное стекло.
-/// Радиусы лампы: ядро и латунный ободок.
-const LAMP_R: f32 = 6.5;
-const BEZEL_R: f32 = 8.5;
 
 /// HWND главного окна (для смены оформления DWM на полном экране).
 #[cfg(windows)]
@@ -142,9 +138,8 @@ enum Btn {
 }
 
 /// Полоса заголовка — первой панелью кадра (на всю ширину окна). В полноэкранном режиме не показывать.
-/// Вид «индикаторные лампы»: слева «AMADEUS» газоразрядным шрифтом (без значка), кнопки — три лампы в латунных ободках,
-/// при наведении загораются (янтарь; «закрыть» — красная).
-/// `badge` — надпись-кнопка слева от ламп (есть обновление); возвращает true, если по ней кликнули.
+/// Слева знак + «Murmur», справа — свернуть/развернуть/закрыть (тонкие значки, подложка при наведении; «закрыть» — красная).
+/// `badge` — надпись-кнопка слева от кнопок (есть обновление); возвращает true, если по ней кликнули.
 pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
     let mut badge_clicked = false;
     egui::Panel::top("titlebar")
@@ -161,7 +156,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
             let maxb = close.translate(vec2(-BTN_W, 0.0));
             let minb = maxb.translate(vec2(-BTN_W, 0.0));
 
-            // надпись «есть обновление»: латунная рамка, янтарный текст, при наведении светится
+            // надпись «есть обновление»: «таблетка» акцента
             let mut drag_right = minb.left();
             if let Some(text) = badge {
                 let galley = ui.painter().layout_no_wrap(
@@ -174,8 +169,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
                 let resp = ui.interact(rect, Id::new("titlebar-badge"), Sense::click());
                 let lit = ctx.animate_bool_with_time(Id::new("titlebar-badge-lit"), resp.hovered(), 0.12);
                 let p = ui.painter();
-                p.rect_filled(rect.expand(3.0 * lit), CornerRadius::same(13), t::p().accent.gamma_multiply(0.10 * lit));
-                p.rect(rect, CornerRadius::same(11), t::p().accent.gamma_multiply(0.08 + 0.10 * lit), Stroke::new(1.0, t::p().border_strong), egui::StrokeKind::Inside);
+                p.rect_filled(rect, CornerRadius::same(255), t::p().accent_soft.lerp_to_gamma(t::p().accent.gamma_multiply(0.3), lit));
                 p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::p().accent);
                 if resp.on_hover_text("Скачать и перезапустить").clicked() {
                     badge_clicked = true;
@@ -195,22 +189,23 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
 
             let p = ui.painter();
             p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t::p().border));
-            let name_pos = pos2(r.left() + 14.0, r.center().y + 1.0);
-            if focused {
-                t::glow_text(p, name_pos, Align2::LEFT_CENTER, "AMADEUS", 19.0);
-            } else {
-                p.text(name_pos, Align2::LEFT_CENTER, "AMADEUS", t::display_font(19.0), t::p().accent.gamma_multiply(0.45));
-            }
+            // знак + «Murmur»; окно без фокуса — приглушённо
+            let mark = Rect::from_center_size(pos2(r.left() + 14.0 + 10.0, r.center().y), vec2(20.0, 20.0));
+            t::logo(p, mark, focused);
+            let name_color = if focused { t::p().text } else { t::p().text_muted };
+            p.text(pos2(mark.right() + 7.0, r.center().y), Align2::LEFT_CENTER, "Murmur", t::xbold(14.0), name_color);
 
             let forced = forced_hover();
             for (rect, kind) in [(minb, Btn::Min), (maxb, Btn::Max), (close, Btn::Close)] {
                 let resp = ui.interact(rect, Id::new(("titlebar-btn", kind as u8)), Sense::click());
                 let hover = resp.hovered() || forced == Some(kind);
-                let mut lit = ctx.animate_bool_with_time(Id::new(("titlebar-lamp", kind as u8)), hover, 0.12);
+                let mut lit = ctx.animate_bool_with_time(Id::new(("titlebar-btn-lit", kind as u8)), hover, 0.12);
                 if resp.is_pointer_button_down_on() {
-                    lit *= 0.8;
+                    lit *= 0.85;
                 }
-                draw_lamp(p, rect.center(), kind, max, lit);
+                let (bg, fg) = btn_colors(kind, lit);
+                p.rect_filled(rect, CornerRadius::ZERO, bg);
+                draw_icon(p, rect.center(), kind, max, fg);
                 let tip = match kind {
                     Btn::Min => "Свернуть",
                     Btn::Max if max => "Восстановить",
@@ -229,7 +224,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
     badge_clicked
 }
 
-/// Отладка вёрстки (только debug): AMADEUS_FRAME_HOVER=min|max|close — лампа горит, как при наведении.
+/// Отладка вёрстки (только debug): AMADEUS_FRAME_HOVER=min|max|close — кнопка как при наведении.
 fn forced_hover() -> Option<Btn> {
     #[cfg(debug_assertions)]
     {
@@ -249,65 +244,37 @@ fn forced_focus() -> bool {
     cfg!(debug_assertions) && std::env::var_os("AMADEUS_FRAME_FOCUS").is_some()
 }
 
-struct LampColors {
-    /// Цвет стекла лампы.
-    core: Color32,
-    /// Свечение вокруг (прозрачное, пока лампа погашена).
-    glow: Color32,
-    /// Значок внутри — проступает, когда лампа горит.
-    glyph: Color32,
-}
-
-/// Цвета лампы; `lit` 0..1 — насколько она зажглась.
-fn lamp_colors(kind: Btn, lit: f32) -> LampColors {
+/// Цвета кнопки рамки: `lit` 0..1 — наведение. «Закрыть» — красная подложка и белый значок.
+fn btn_colors(kind: Btn, lit: f32) -> (Color32, Color32) {
+    let p = t::p();
     let lit = lit.clamp(0.0, 1.0);
-    let on = if kind == Btn::Close { t::p().danger } else { t::p().accent };
-    let a = (lit * 255.0).round() as u8;
-    LampColors {
-        core: t::p().surface_3.lerp_to_gamma(on, lit),
-        glow: Color32::from_rgba_unmultiplied(on.r(), on.g(), on.b(), (lit * 120.0).round() as u8),
-        glyph: Color32::from_rgba_unmultiplied(t::p().on_accent.r(), t::p().on_accent.g(), t::p().on_accent.b(), a),
-    }
+    let on = if kind == Btn::Close { p.danger } else { p.row_hover };
+    let bg = Color32::TRANSPARENT.lerp_to_gamma(on, lit);
+    let fg = if kind == Btn::Close { p.text_muted.lerp_to_gamma(Color32::WHITE, lit) } else { p.text_muted.lerp_to_gamma(p.text, lit) };
+    if lit >= 1.0 { (on, if kind == Btn::Close { Color32::WHITE } else { p.text }) } else { (bg, fg) }
 }
 
-fn draw_lamp(p: &egui::Painter, c: Pos2, kind: Btn, maximized: bool, lit: f32) {
-    let col = lamp_colors(kind, lit);
-    if lit > 0.01 {
-        t::radial_glow(p, c, 16.0, col.glow);
-    }
-    // латунный ободок: тускнеет, пока лампа не горит
-    let bezel = t::p().border_strong.lerp_to_gamma(t::p().border_strong, lit);
-    p.circle_filled(c, BEZEL_R, t::p().bg);
-    p.circle_stroke(c, BEZEL_R - 1.0, Stroke::new(2.0, bezel));
-    p.circle_filled(c, LAMP_R, col.core);
-    // блик на стекле (сверху слева)
-    let shine = if lit > 0.01 { t::p().accent_hover.gamma_multiply(0.75 * lit) } else { Color32::from_white_alpha(14) };
-    p.circle_filled(c + vec2(-2.0, -2.2), 2.2, shine);
-    if col.glyph.a() > 0 {
-        draw_icon(p, c, kind, maximized, col.glyph);
-    }
-}
-
-/// Значки 6×6 (внутри лампы).
+/// Значки 10×10 (тонкая линия).
 fn draw_icon(p: &egui::Painter, c: Pos2, kind: Btn, maximized: bool, color: Color32) {
-    let s = Stroke::new(1.4, color);
+    let s = Stroke::new(1.2, color);
     let c = pos2(c.x.round() + 0.5, c.y.round() + 0.5);
+    let k = 5.0 / 3.0; // было 6×6 — теперь 10×10
     match kind {
         Btn::Min => {
-            p.hline(c.x - 3.0..=c.x + 3.0, c.y, s);
+            p.hline(c.x - 3.0 * k..=c.x + 3.0 * k, c.y, s);
         }
         Btn::Max if !maximized => {
-            p.rect_stroke(Rect::from_center_size(c, vec2(6.0, 6.0)), CornerRadius::ZERO, s, egui::StrokeKind::Middle);
+            p.rect_stroke(Rect::from_center_size(c, vec2(6.0 * k, 6.0 * k)), CornerRadius::same(1), s, egui::StrokeKind::Middle);
         }
         Btn::Max => {
             // «восстановить»: два квадрата, задний виден уголком
-            p.rect_stroke(Rect::from_min_size(pos2(c.x - 3.0, c.y - 1.5), vec2(4.5, 4.5)), CornerRadius::ZERO, s, egui::StrokeKind::Middle);
-            p.line_segment([pos2(c.x - 1.5, c.y - 3.0), pos2(c.x + 3.0, c.y - 3.0)], s);
-            p.line_segment([pos2(c.x + 3.0, c.y - 3.0), pos2(c.x + 3.0, c.y + 1.5)], s);
+            p.rect_stroke(Rect::from_min_size(pos2(c.x - 3.0 * k, c.y - 1.5 * k), vec2(4.5 * k, 4.5 * k)), CornerRadius::same(1), s, egui::StrokeKind::Middle);
+            p.line_segment([pos2(c.x - 1.5 * k, c.y - 3.0 * k), pos2(c.x + 3.0 * k, c.y - 3.0 * k)], s);
+            p.line_segment([pos2(c.x + 3.0 * k, c.y - 3.0 * k), pos2(c.x + 3.0 * k, c.y + 1.5 * k)], s);
         }
         Btn::Close => {
-            p.line_segment([pos2(c.x - 3.0, c.y - 3.0), pos2(c.x + 3.0, c.y + 3.0)], s);
-            p.line_segment([pos2(c.x - 3.0, c.y + 3.0), pos2(c.x + 3.0, c.y - 3.0)], s);
+            p.line_segment([pos2(c.x - 3.0 * k, c.y - 3.0 * k), pos2(c.x + 3.0 * k, c.y + 3.0 * k)], s);
+            p.line_segment([pos2(c.x - 3.0 * k, c.y + 3.0 * k), pos2(c.x + 3.0 * k, c.y - 3.0 * k)], s);
         }
     }
 }
@@ -330,15 +297,17 @@ mod tests {
     }
 
     #[test]
-    fn lamp_colors_states() {
+    fn button_colors_states() {
         for k in [Btn::Min, Btn::Max, Btn::Close] {
-            let off = lamp_colors(k, 0.0);
-            assert_eq!(off.glyph.a(), 0);
-            assert_eq!(off.glow.a(), 0);
-            assert_eq!(off.core, t::p().surface_3);
-            let on = lamp_colors(k, 1.0);
-            assert_eq!(on.glyph.a(), 255);
-            assert_eq!(on.core, if k == Btn::Close { t::p().danger } else { t::p().accent });
+            let (bg, fg) = btn_colors(k, 0.0);
+            assert_eq!(bg.a(), 0, "без наведения подложки нет");
+            assert_eq!(fg, t::p().text_muted);
+            let (bg, fg) = btn_colors(k, 1.0);
+            if k == Btn::Close {
+                assert_eq!((bg, fg), (t::p().danger, Color32::WHITE));
+            } else {
+                assert_eq!((bg, fg), (t::p().row_hover, t::p().text));
+            }
         }
     }
 }

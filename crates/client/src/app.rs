@@ -918,15 +918,22 @@ impl App {
                     .frame(Frame::new().inner_margin(Margin { left: 18, right: 18, top: 16, bottom: 12 }))
                     .show(ui, |ui| {
                         // фаза 9: здесь будет название сервера
-                        ui.label(RichText::new("Amadeus").font(t::xbold(18.0)).color(t::p().text));
+                        ui.label(RichText::new("Murmur").font(t::xbold(18.0)).color(t::p().text));
                         let r = ui.max_rect();
                         ui.painter().hline(full.x_range(), r.bottom() + 12.0, Stroke::new(1.0, t::p().border));
                     });
                 egui::Panel::bottom("side-me")
                     .show_separator_line(false)
-                    .frame(Frame::new().fill(t::p().surface_2).inner_margin(Margin::symmetric(12, 12)))
-                    .show(ui, |ui| self.ui_me(ui, vs));
-                egui::CentralPanel::no_frame().show(ui, |ui| {
+                    .frame(Frame::new().inner_margin(Margin::same(8)))
+                    .show(ui, |ui| {
+                        Frame::new()
+                            .fill(t::p().surface_2)
+                            .stroke(Stroke::new(1.0, t::p().border))
+                            .corner_radius(CornerRadius::same(kit::R_CARD))
+                            .inner_margin(Margin::symmetric(10, 8))
+                            .show(ui, |ui| self.ui_me(ui, vs));
+                    });
+                egui::CentralPanel::no_frame().frame(Frame::new().inner_margin(Margin::symmetric(8, 0))).show(ui, |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.ui_channel_list(ui, vs));
                 });
             });
@@ -934,6 +941,7 @@ impl App {
 
     fn ui_channel_list(&mut self, ui: &mut Ui, vs: &VoiceState) {
         ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add_space(6.0);
         group_label(ui, "Голосовые каналы");
         let voice: Vec<Channel> = self.channels.iter().filter(|c| c.kind == ChannelKind::Voice).cloned().collect();
         if voice.is_empty() {
@@ -945,8 +953,8 @@ impl App {
         }
         for ch in voice {
             let active = vs.channel.as_ref().is_some_and(|c| c.id == ch.id);
-            let count = if active && vs.conn == Conn::Connected { Some(vs.peers.len()) } else { None };
-            if channel_row(ui, ph::SPEAKER_HIGH, &ch.name, active, count, true).clicked() {
+            let count = if active && vs.conn == Conn::Connected { Some(vs.peers.len().to_string()) } else { None };
+            if kit::row(ui, ph::SPEAKER_HIGH, &ch.name, active, count.as_deref(), true).clicked() {
                 // уже в этом канале — просто вернуться к сцене (из чата)
                 if !(active && vs.conn == Conn::Connected) {
                     self.voice.send(Cmd::Join(ch.clone()));
@@ -965,7 +973,7 @@ impl App {
             group_label(ui, "Текстовые каналы");
             for ch in text {
                 let open = self.view == View::Text(ch.id);
-                if channel_row(ui, ph::HASH, &ch.name, open, None, true).clicked() {
+                if kit::row(ui, ph::HASH, &ch.name, open, None, true).clicked() {
                     self.view = View::Text(ch.id);
                 }
             }
@@ -2474,31 +2482,12 @@ fn field(text: &mut String, w: f32) -> TextEdit<'_> {
 }
 
 fn group_label(ui: &mut Ui, text: &str) {
-    ui.add_space(14.0);
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.add_space(18.0);
-        ui.label(RichText::new(text).font(t::semibold(12.5)).color(t::p().text_muted));
+        ui.add_space(10.0);
+        kit::group_label(ui, text);
     });
-    ui.add_space(4.0);
-}
-
-fn channel_row(ui: &mut Ui, icon: &str, name: &str, active: bool, count: Option<usize>, enabled: bool) -> egui::Response {
-    let w = ui.available_width();
-    let (outer, resp) = ui.allocate_exact_size(vec2(w, 36.0), if enabled { Sense::click() } else { Sense::hover() });
-    let rect = Rect::from_min_max(outer.min + vec2(10.0, 0.0), outer.max - vec2(10.0, 0.0));
-    let p = ui.painter();
-    if active {
-        p.rect_filled(rect, CornerRadius::same(7), t::p().surface_2);
-    } else if resp.hovered() && enabled {
-        p.rect_filled(rect, CornerRadius::same(7), t::p().row_active);
-    }
-    let color = if active || (resp.hovered() && enabled) { t::p().text } else if enabled { t::p().text_muted } else { t::p().text_muted.gamma_multiply(0.6) };
-    p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, icon, t::font(20.0), color);
-    p.text(rect.left_center() + vec2(40.0, 0.0), Align2::LEFT_CENTER, name, t::semibold(15.0), color);
-    if let Some(n) = count {
-        p.text(rect.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, n.to_string(), t::font(12.0), t::p().text_muted);
-    }
-    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+    ui.add_space(2.0);
 }
 
 /// Человек за участником голоса (identity = id пользователя); нет в кэше — имя из LiveKit.
@@ -2517,21 +2506,21 @@ fn peer_name(people: &People, p: &Peer) -> String {
 
 fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
     let glow = speak_glow(ui, p);
     let painter = ui.painter();
-    let c = pos2(rect.left() + 48.0 + 11.0, rect.center().y);
+    let c = pos2(rect.left() + 40.0 + 11.0, rect.center().y);
     let u = peer_user(people, p);
     people.paint(painter, c, 11.0, &u, glow * 0.7, false);
     let color = if glow > 0.05 { t::p().text } else { t::p().text_muted };
-    painter.text(pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, u.shown_name(), t::font(13.5), color);
-    let mut x = rect.right() - 22.0;
+    painter.text(pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, u.shown_name(), t::semibold(14.0), color);
+    let mut x = rect.right() - 12.0;
     if p.mic_muted {
         painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::p().danger);
         x -= 20.0;
     }
     if p.streaming {
-        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::p().accent);
+        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::p().danger);
     }
 }
 
@@ -2640,24 +2629,46 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
 Звук: {audio}", s.title, s.preset.label()));
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PingLevel {
+    Good,
+    Ok,
+    Bad,
+}
+
+/// Качество пинга: до 80 мс — хорошо, до 200 — терпимо, дальше — плохо.
+fn ping_level(rtt: f64) -> PingLevel {
+    match rtt {
+        r if r < 0.080 => PingLevel::Good,
+        r if r < 0.200 => PingLevel::Ok,
+        _ => PingLevel::Bad,
+    }
+}
+
+/// Пинг в шапке: «таблетка» с точкой качества и миллисекундами.
 fn ping_box(ui: &mut Ui, rtt: f64) {
+    let p = t::p();
+    let color = match ping_level(rtt) {
+        PingLevel::Good => p.speaking,
+        PingLevel::Ok => Color32::from_rgb(0xE8, 0xA3, 0x3D),
+        PingLevel::Bad => p.danger,
+    };
     Frame::new()
-        .fill(t::p().bg)
-        .stroke(Stroke::new(1.0, t::p().border_strong))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin { left: 12, right: 12, top: 2, bottom: 2 })
+        .fill(p.surface_2)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(255))
+        .inner_margin(Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            // Родитель — right_to_left (прижато к правому краю), поэтому порядок обратный: подпись, затем число.
+            // Родитель — right_to_left, поэтому порядок обратный: подпись, затем точка.
             ui.horizontal(|ui| {
-                let text = format!("{:.3}", rtt.min(9.999));
-                let num_w = ui.painter().layout_no_wrap(text.clone(), t::display_font(28.0), t::p().accent).size().x;
-                ui.label(RichText::new("пинг, с").size(12.0).color(t::p().text_muted));
-                let (rect, _) = ui.allocate_exact_size(vec2(num_w + 4.0, 34.0), Sense::hover());
-                t::glow_text(ui.painter(), rect.left_center(), Align2::LEFT_CENTER, &text, 28.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(RichText::new(format!("{:.0} мс", rtt * 1000.0)).font(t::bold(13.5)).color(p.text));
+                let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, color);
             });
         })
         .response
-        .on_hover_text(format!("Время до сервера и обратно: {:.0} мс", rtt * 1000.0));
+        .on_hover_text("Время до сервера голоса и обратно");
 }
 
 /// Выпадающий список устройств. Возвращает true, если выбор изменился.
@@ -2703,4 +2714,16 @@ fn toggle_row(ui: &mut Ui, w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnc
         ui.with_layout(Layout::right_to_left(Align::Center), right);
     });
     ui.add_space(4.0);
+}
+
+#[cfg(test)]
+mod ping_tests {
+    use super::{PingLevel, ping_level};
+
+    #[test]
+    fn ping_levels() {
+        assert_eq!(ping_level(0.037), PingLevel::Good);
+        assert_eq!(ping_level(0.120), PingLevel::Ok);
+        assert_eq!(ping_level(0.350), PingLevel::Bad);
+    }
 }
