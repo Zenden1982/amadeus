@@ -6,3 +6,4 @@ target/
 deploy/generated/
 .superpowers/
 dist/
+.superpowers/brainstorm/
