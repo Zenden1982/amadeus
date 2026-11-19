@@ -26,7 +26,7 @@ static HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::ne
 /// Цвет тонкой рамки DWM (COLORREF = 0x00BBGGRR).
 #[cfg(windows)]
 fn border_colorref() -> u32 {
-    let c = t::BORDER_DIM;
+    let c = t::p().border;
     (c.b() as u32) << 16 | (c.g() as u32) << 8 | c.r() as u32
 }
 
@@ -151,7 +151,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
         .exact_size(HEIGHT)
         .resizable(false)
         .show_separator_line(false)
-        .frame(egui::Frame::new().fill(t::TITLE_BG))
+        .frame(egui::Frame::new().fill(t::p().title_bg))
         .show(ui, |ui| {
             let ctx = ui.ctx().clone();
             let r = ui.max_rect();
@@ -167,16 +167,16 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
                 let galley = ui.painter().layout_no_wrap(
                     format!("{}  {text}", egui_phosphor::regular::ARROW_CIRCLE_UP),
                     t::bold(12.5),
-                    t::ACCENT,
+                    t::p().accent,
                 );
                 let size = vec2(galley.size().x + 20.0, 22.0);
                 let rect = Rect::from_min_size(pos2(minb.left() - 12.0 - size.x, r.center().y - size.y / 2.0), size);
                 let resp = ui.interact(rect, Id::new("titlebar-badge"), Sense::click());
                 let lit = ctx.animate_bool_with_time(Id::new("titlebar-badge-lit"), resp.hovered(), 0.12);
                 let p = ui.painter();
-                p.rect_filled(rect.expand(3.0 * lit), CornerRadius::same(13), t::ACCENT.gamma_multiply(0.10 * lit));
-                p.rect(rect, CornerRadius::same(11), t::ACCENT.gamma_multiply(0.08 + 0.10 * lit), Stroke::new(1.0, t::BORDER), egui::StrokeKind::Inside);
-                p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::ACCENT);
+                p.rect_filled(rect.expand(3.0 * lit), CornerRadius::same(13), t::p().accent.gamma_multiply(0.10 * lit));
+                p.rect(rect, CornerRadius::same(11), t::p().accent.gamma_multiply(0.08 + 0.10 * lit), Stroke::new(1.0, t::p().border_strong), egui::StrokeKind::Inside);
+                p.galley(pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0), galley, t::p().accent);
                 if resp.on_hover_text("Скачать и перезапустить").clicked() {
                     badge_clicked = true;
                 }
@@ -194,12 +194,12 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
             }
 
             let p = ui.painter();
-            p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t::TITLE_SEPARATOR));
+            p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t::p().border));
             let name_pos = pos2(r.left() + 14.0, r.center().y + 1.0);
             if focused {
                 t::glow_text(p, name_pos, Align2::LEFT_CENTER, "AMADEUS", 19.0);
             } else {
-                p.text(name_pos, Align2::LEFT_CENTER, "AMADEUS", t::display_font(19.0), t::ACCENT.gamma_multiply(0.45));
+                p.text(name_pos, Align2::LEFT_CENTER, "AMADEUS", t::display_font(19.0), t::p().accent.gamma_multiply(0.45));
             }
 
             let forced = forced_hover();
@@ -261,12 +261,12 @@ struct LampColors {
 /// Цвета лампы; `lit` 0..1 — насколько она зажглась.
 fn lamp_colors(kind: Btn, lit: f32) -> LampColors {
     let lit = lit.clamp(0.0, 1.0);
-    let on = if kind == Btn::Close { t::DANGER } else { t::ACCENT };
+    let on = if kind == Btn::Close { t::p().danger } else { t::p().accent };
     let a = (lit * 255.0).round() as u8;
     LampColors {
-        core: t::LAMP_OFF.lerp_to_gamma(on, lit),
+        core: t::p().surface_3.lerp_to_gamma(on, lit),
         glow: Color32::from_rgba_unmultiplied(on.r(), on.g(), on.b(), (lit * 120.0).round() as u8),
-        glyph: Color32::from_rgba_unmultiplied(t::ON_ACCENT.r(), t::ON_ACCENT.g(), t::ON_ACCENT.b(), a),
+        glyph: Color32::from_rgba_unmultiplied(t::p().on_accent.r(), t::p().on_accent.g(), t::p().on_accent.b(), a),
     }
 }
 
@@ -276,12 +276,12 @@ fn draw_lamp(p: &egui::Painter, c: Pos2, kind: Btn, maximized: bool, lit: f32) {
         t::radial_glow(p, c, 16.0, col.glow);
     }
     // латунный ободок: тускнеет, пока лампа не горит
-    let bezel = t::BEZEL_OFF.lerp_to_gamma(t::BORDER_STRONG, lit);
-    p.circle_filled(c, BEZEL_R, t::BEZEL_RIM);
+    let bezel = t::p().border_strong.lerp_to_gamma(t::p().border_strong, lit);
+    p.circle_filled(c, BEZEL_R, t::p().bg);
     p.circle_stroke(c, BEZEL_R - 1.0, Stroke::new(2.0, bezel));
     p.circle_filled(c, LAMP_R, col.core);
     // блик на стекле (сверху слева)
-    let shine = if lit > 0.01 { t::ACCENT_BRIGHT.gamma_multiply(0.75 * lit) } else { Color32::from_white_alpha(14) };
+    let shine = if lit > 0.01 { t::p().accent_hover.gamma_multiply(0.75 * lit) } else { Color32::from_white_alpha(14) };
     p.circle_filled(c + vec2(-2.0, -2.2), 2.2, shine);
     if col.glyph.a() > 0 {
         draw_icon(p, c, kind, maximized, col.glyph);
@@ -335,10 +335,10 @@ mod tests {
             let off = lamp_colors(k, 0.0);
             assert_eq!(off.glyph.a(), 0);
             assert_eq!(off.glow.a(), 0);
-            assert_eq!(off.core, t::LAMP_OFF);
+            assert_eq!(off.core, t::p().surface_3);
             let on = lamp_colors(k, 1.0);
             assert_eq!(on.glyph.a(), 255);
-            assert_eq!(on.core, if k == Btn::Close { t::DANGER } else { t::ACCENT });
+            assert_eq!(on.core, if k == Btn::Close { t::p().danger } else { t::p().accent });
         }
     }
 }

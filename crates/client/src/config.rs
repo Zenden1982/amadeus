@@ -16,6 +16,29 @@ pub const DEFAULT_SERVER: &str = match option_env!("AMADEUS_SERVER") {
 /// Клавиша рации по умолчанию — V (виртуальный код Windows).
 pub const DEFAULT_PTT_KEY: u32 = 0x56;
 
+/// Тема оформления.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePref {
+    /// Как в Windows (по умолчанию).
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemePref {
+    pub const ALL: [ThemePref; 3] = [ThemePref::System, ThemePref::Dark, ThemePref::Light];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePref::System => "Как в Windows",
+            ThemePref::Dark => "Тёмная",
+            ThemePref::Light => "Светлая",
+        }
+    }
+}
+
 /// Шумоподавление микрофона.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +99,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Запускать вместе с Windows (только у установленной программы).
     pub autostart: bool,
+    /// Тема оформления.
+    pub theme: ThemePref,
 }
 
 impl Default for Settings {
@@ -99,6 +124,7 @@ impl Default for Settings {
             stream_volume: HashMap::new(),
             close_to_tray: true,
             autostart: true,
+            theme: ThemePref::default(),
         }
     }
 }
@@ -159,5 +185,16 @@ impl Settings {
     /// Итоговая громкость участника для WebRTC (с учётом «заглушить для себя»).
     pub fn effective_volume(&self, identity: &str) -> f32 {
         if self.is_user_muted(identity) { 0.0 } else { self.volume_of(identity) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_default_theme() {
+        let s: Settings = serde_json::from_str(r#"{"noise_suppression":true}"#).unwrap();
+        assert_eq!(s.theme, ThemePref::System);
     }
 }

@@ -15,7 +15,7 @@ use proto::{AuthResponse, Channel, ChannelKind, Invite, User};
 
 use crate::api::{self, Api, ApiError, ApiResult};
 use crate::chat::Chat;
-use crate::config::{NoiseMode, Settings};
+use crate::config::{NoiseMode, Settings, ThemePref};
 use crate::desktop::{self, Window};
 use crate::tray::Tray;
 use crate::update::{self, Updater};
@@ -479,20 +479,20 @@ impl App {
     // ------------------------------------------------------------ экран входа
 
     fn ui_boot(&mut self, ui: &mut Ui) {
-        egui::CentralPanel::no_frame().frame(Frame::new().fill(t::BG)).show(ui, |ui| {
+        egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
             let r = ui.max_rect();
             let p = ui.painter();
             t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 40.0), vec2(96.0, 96.0)), true);
             match &self.boot_error {
                 None => {
-                    p.text(r.center() + vec2(0.0, 40.0), Align2::CENTER_CENTER, "Подключаемся к серверу…", t::font(15.0), t::TEXT_MUTED);
+                    p.text(r.center() + vec2(0.0, 40.0), Align2::CENTER_CENTER, "Подключаемся к серверу…", t::font(15.0), t::p().text_muted);
                 }
                 Some(err) => {
                     let err = err.clone();
                     let area = Rect::from_center_size(r.center() + vec2(0.0, 80.0), vec2(420.0, 120.0));
                     ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.label(RichText::new(format!("{} {err}", ph::WARNING_CIRCLE)).color(t::DANGER_TEXT));
+                            ui.label(RichText::new(format!("{} {err}", ph::WARNING_CIRCLE)).color(t::p().danger_text));
                             ui.horizontal(|ui| {
                                 ui.add_space(120.0);
                                 if ui.button("Повторить").clicked() {
@@ -514,18 +514,18 @@ impl App {
             .exact_size(440.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t::SURFACE).inner_margin(Margin { left: 44, right: 44, top: 56, bottom: 56 }))
+            .frame(Frame::new().fill(t::p().surface).inner_margin(Margin { left: 44, right: 44, top: 56, bottom: 56 }))
             .show(ui, |ui| {
                 let r = ui.max_rect();
-                ui.painter().vline(r.left() - 44.0, ui.clip_rect().y_range(), Stroke::new(1.0, t::BORDER));
+                ui.painter().vline(r.left() - 44.0, ui.clip_rect().y_range(), Stroke::new(1.0, t::p().border_strong));
                 self.ui_login_form(ui);
             });
-        egui::CentralPanel::no_frame().frame(Frame::new().fill(t::BG).inner_margin(Margin::symmetric(64, 56))).show(ui, |ui| {
+        egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::symmetric(64, 56))).show(ui, |ui| {
             let r = ui.max_rect();
             let p = ui.painter().clone();
             // мягкое янтарное свечение за числом
             let c = pos2(r.left() + r.width() * 0.3, r.top() + r.height() * 0.62);
-            t::radial_glow(&p, c, 380.0, t::HERO_GLOW);
+            t::radial_glow(&p, c, 380.0, t::p().accent_soft);
             t::wordmark(ui, 52.0, 26.0);
             let mid = r.center().y;
             t::glow_text(&p, pos2(r.left(), mid + 10.0), Align2::LEFT_BOTTOM, "1.048596", 120.0);
@@ -534,7 +534,7 @@ impl App {
                 Align2::LEFT_TOP,
                 "Голосовой чат для своих.\nПопасть сюда можно только по приглашению.",
                 t::font(15.0),
-                t::TEXT_MUTED,
+                t::p().text_muted,
             );
             // адрес сервера
             let bottom = Rect::from_min_max(pos2(r.left(), r.bottom() - 34.0), r.max);
@@ -544,14 +544,14 @@ impl App {
                     match self.login.server_edit.take() {
                         None => {
                             let host = self.settings.server_url.trim_start_matches("https://").trim_start_matches("http://").to_string();
-                            ui.label(RichText::new(format!("{} {host} ·", ph::HARD_DRIVES)).color(t::TEXT_MUTED).size(13.0));
+                            ui.label(RichText::new(format!("{} {host} ·", ph::HARD_DRIVES)).color(t::p().text_muted).size(13.0));
                             let link = ui.add(egui::Label::new(RichText::new("сменить сервер").size(13.0).underline()).sense(Sense::click()));
                             if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                 self.login.server_edit = Some(self.settings.server_url.clone());
                             } 
                         }
                         Some(mut s) => {
-                            ui.label(RichText::new(ph::HARD_DRIVES).color(t::TEXT_MUTED));
+                            ui.label(RichText::new(ph::HARD_DRIVES).color(t::p().text_muted));
                             let r = ui.add(TextEdit::singleline(&mut s).desired_width(280.0).hint_text("https://api.example.ru"));
                             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                             if ui.button("OK").clicked() || enter {
@@ -571,16 +571,16 @@ impl App {
         let w = ui.available_width();
         // вкладки
         let (tabs_rect, _) = ui.allocate_exact_size(vec2(w, 42.0), Sense::hover());
-        ui.painter().rect_filled(tabs_rect, CornerRadius::same(10), t::BG);
+        ui.painter().rect_filled(tabs_rect, CornerRadius::same(10), t::p().bg);
         let half = (tabs_rect.width() - 8.0) / 2.0;
         for (i, (tab, label)) in [(Tab::Login, "Вход"), (Tab::Invite, "У меня приглашение")].into_iter().enumerate() {
             let rr = Rect::from_min_size(tabs_rect.min + vec2(4.0 + half * i as f32, 4.0), vec2(half, 34.0));
             let resp = ui.interact(rr, Id::new(("tab", i)), Sense::click());
             let on = self.login.tab == tab;
             if on {
-                ui.painter().rect_filled(rr, CornerRadius::same(7), t::SURFACE_2);
+                ui.painter().rect_filled(rr, CornerRadius::same(7), t::p().surface_2);
             }
-            let color = if on || resp.hovered() { t::TEXT } else { t::TEXT_MUTED };
+            let color = if on || resp.hovered() { t::p().text } else { t::p().text_muted };
             ui.painter().text(rr.center(), Align2::CENTER_CENTER, label, t::semibold(14.0), color);
             if resp.clicked() && !on {
                 self.login.tab = tab;
@@ -593,7 +593,7 @@ impl App {
         if self.login.tab == Tab::Invite {
             label(ui, "Код приглашения");
             self.invite_input(ui, w);
-            ui.label(RichText::new("Регистр и дефисы не важны — можно вставить целиком.").size(12.5).color(t::TEXT_MUTED));
+            ui.label(RichText::new("Регистр и дефисы не важны — можно вставить целиком.").size(12.5).color(t::p().text_muted));
             ui.add_space(12.0);
         }
         label(ui, "Ник");
@@ -606,7 +606,7 @@ impl App {
         ui.add_space(14.0);
         if let Some(err) = &self.login.error {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::DANGER_TEXT));
+                ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
             });
         }
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
@@ -636,17 +636,17 @@ impl App {
                     TextEdit::singleline(&mut self.login.invite[i])
                         .id(ids[i])
                         .font(t::display_font(26.0))
-                        .text_color(t::ACCENT)
+                        .text_color(t::p().accent)
                         .horizontal_align(Align::Center)
                         .desired_width(seg_w)
                         .margin(Margin::symmetric(10, 6))
-                        .hint_text(RichText::new("····").font(t::display_font(26.0)).color(t::BORDER)),
+                        .hint_text(RichText::new("····").font(t::display_font(26.0)).color(t::p().border_strong)),
                 );
                 if resp.changed() {
                     edited = Some(i);
                 }
                 if i < 2 {
-                    ui.label(RichText::new("–").color(t::BORDER).size(20.0));
+                    ui.label(RichText::new("–").color(t::p().border_strong).size(20.0));
                 }
             }
         });
@@ -702,12 +702,12 @@ impl App {
         match text_channel {
             Some(ch) => {
                 let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open;
-                egui::CentralPanel::no_frame().frame(Frame::new().fill(t::BG)).show(ui, |ui| {
+                egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal, &self.people);
                 });
             }
             None => {
-                egui::CentralPanel::no_frame().frame(Frame::new().fill(t::BG).inner_margin(Margin::same(28))).show(ui, |ui| {
+                egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::same(28))).show(ui, |ui| {
                     self.ui_stage(ui, &vs);
                 });
             }
@@ -847,23 +847,23 @@ impl App {
             .exact_size(260.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t::SURFACE))
+            .frame(Frame::new().fill(t::p().surface))
             .show(ui, |ui| {
                 let full = ui.max_rect();
-                ui.painter().vline(full.right(), full.y_range(), Stroke::new(1.0, t::BORDER_DIM));
+                ui.painter().vline(full.right(), full.y_range(), Stroke::new(1.0, t::p().border));
 
                 egui::Panel::top("side-top")
                     .show_separator_line(false)
                     .frame(Frame::new().inner_margin(Margin { left: 18, right: 18, top: 16, bottom: 12 }))
                     .show(ui, |ui| {
                         // фаза 9: здесь будет название сервера
-                        ui.label(RichText::new("Amadeus").font(t::xbold(18.0)).color(t::TEXT));
+                        ui.label(RichText::new("Amadeus").font(t::xbold(18.0)).color(t::p().text));
                         let r = ui.max_rect();
-                        ui.painter().hline(full.x_range(), r.bottom() + 12.0, Stroke::new(1.0, t::BORDER_DIM));
+                        ui.painter().hline(full.x_range(), r.bottom() + 12.0, Stroke::new(1.0, t::p().border));
                     });
                 egui::Panel::bottom("side-me")
                     .show_separator_line(false)
-                    .frame(Frame::new().fill(t::SURFACE_ME).inner_margin(Margin::symmetric(12, 12)))
+                    .frame(Frame::new().fill(t::p().surface_2).inner_margin(Margin::symmetric(12, 12)))
                     .show(ui, |ui| self.ui_me(ui, vs));
                 egui::CentralPanel::no_frame().show(ui, |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.ui_channel_list(ui, vs));
@@ -879,7 +879,7 @@ impl App {
             let text = self.channels_error.clone().unwrap_or_else(|| "Загрузка…".into());
             ui.horizontal(|ui| {
                 ui.add_space(18.0);
-                ui.label(RichText::new(text).size(13.0).color(t::TEXT_MUTED));
+                ui.label(RichText::new(text).size(13.0).color(t::p().text_muted));
             });
         }
         for ch in voice {
@@ -930,7 +930,7 @@ impl App {
                     (Conn::Reconnecting | Conn::Rejoining { .. }, _) => "нет связи…".into(),
                     _ => "не в канале".into(),
                 };
-                ui.label(RichText::new(sub).size(12.0).color(t::TEXT_MUTED));
+                ui.label(RichText::new(sub).size(12.0).color(t::p().text_muted));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -955,10 +955,10 @@ impl App {
             .exact_size(64.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t::BG).inner_margin(Margin::symmetric(24, 0)))
+            .frame(Frame::new().fill(t::p().bg).inner_margin(Margin::symmetric(24, 0)))
             .show(ui, |ui| {
                 let r = ui.max_rect();
-                ui.painter().hline(r.x_range().expand(24.0), r.bottom(), Stroke::new(1.0, t::BORDER_DIM));
+                ui.painter().hline(r.x_range().expand(24.0), r.bottom(), Stroke::new(1.0, t::p().border));
                 let text_ch = match self.view {
                     View::Text(id) => self.channels.iter().find(|c| c.id == id).map(|c| c.name.clone()),
                     View::Voice => None,
@@ -966,23 +966,23 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;
                     if let Some(name) = text_ch {
-                        ui.label(RichText::new(ph::HASH).size(20.0).color(t::TEXT_MUTED));
+                        ui.label(RichText::new(ph::HASH).size(20.0).color(t::p().text_muted));
                         ui.label(RichText::new(name).font(t::xbold(18.0)));
                     } else {
                     match &vs.channel {
                         Some(ch) => {
-                            ui.label(RichText::new(ph::SPEAKER_HIGH).size(20.0).color(t::TEXT_MUTED));
+                            ui.label(RichText::new(ph::SPEAKER_HIGH).size(20.0).color(t::p().text_muted));
                             ui.label(RichText::new(&ch.name).font(t::xbold(18.0)));
                             if vs.conn == Conn::Connected {
                                 ui.label(
                                     RichText::new(t::plural(vs.peers.len(), "участник", "участника", "участников"))
                                         .size(13.5)
-                                        .color(t::TEXT_MUTED),
+                                        .color(t::p().text_muted),
                                 );
                             }
                         }
                         None => {
-                            ui.label(RichText::new("Не в канале").font(t::xbold(18.0)).color(t::TEXT_MUTED));
+                            ui.label(RichText::new("Не в канале").font(t::xbold(18.0)).color(t::p().text_muted));
                         }
                     }
                     }
@@ -1004,10 +1004,10 @@ impl App {
             .exact_size(76.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t::DOCK_BG))
+            .frame(Frame::new().fill(t::p().surface))
             .show(ui, |ui| {
                 let r = ui.max_rect();
-                ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, t::BORDER_DIM));
+                ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, t::p().border));
                 let in_room = vs.channel.is_some();
                 let mic_off = vs.self_muted || vs.deafened;
                 let (mic_icon, mic_style) = if mic_off {
@@ -1039,7 +1039,7 @@ impl App {
                     }
                     if vs.ptt_enabled {
                         ui.add_space(4.0);
-                        ui.label(RichText::new("Рация: держите").size(13.0).color(t::TEXT_MUTED));
+                        ui.label(RichText::new("Рация: держите").size(13.0).color(t::p().text_muted));
                         t::keycap(ui, &key);
                         ui.add_space(4.0);
                     }
@@ -1073,7 +1073,7 @@ impl App {
                 let area = Rect::from_center_size(r.center(), vec2(460.0, 140.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(format!("{}  {msg}", ph::WARNING_CIRCLE)).color(t::DANGER_TEXT));
+                        ui.label(RichText::new(format!("{}  {msg}", ph::WARNING_CIRCLE)).color(t::p().danger_text));
                         ui.add_space(8.0);
                         if let Some(ch) = vs.channel.clone()
                             && ui.button("Повторить").clicked() {
@@ -1085,10 +1085,10 @@ impl App {
             (_, None) => {
                 let p = ui.painter();
                 t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 50.0), vec2(110.0, 110.0)), true);
-                p.text(r.center() + vec2(0.0, 30.0), Align2::CENTER_TOP, "Выберите голосовой канал слева", t::semibold(16.0), t::TEXT_MUTED);
+                p.text(r.center() + vec2(0.0, 30.0), Align2::CENTER_TOP, "Выберите голосовой канал слева", t::semibold(16.0), t::p().text_muted);
             }
             (Conn::Connecting, Some(_)) if vs.peers.is_empty() => {
-                ui.painter().text(r.center(), Align2::CENTER_CENTER, "Подключаемся…", t::semibold(16.0), t::TEXT_MUTED);
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, "Подключаемся…", t::semibold(16.0), t::p().text_muted);
             }
             _ => self.ui_room(ui, vs),
         }
@@ -1155,17 +1155,17 @@ impl App {
         let hovered = ui.rect_contains_pointer(rect);
         let painter = ui.painter().clone();
         let radius = CornerRadius::same(12);
-        painter.rect_filled(rect, radius, t::VIDEO_BG);
+        painter.rect_filled(rect, radius, t::p().video_bg);
         let small = rect.height() < 200.0;
 
         if p.is_local {
             // Своё видео не декодируем (лишняя нагрузка) — только подпись.
             let title = vs.stream.as_ref().map(|s| s.title.clone()).unwrap_or_default();
             let c = rect.center();
-            painter.text(c - vec2(0.0, if small { 14.0 } else { 26.0 }), Align2::CENTER_CENTER, ph::MONITOR_ARROW_UP, t::font(if small { 26.0 } else { 40.0 }), t::ACCENT);
-            painter.text(c + vec2(0.0, if small { 12.0 } else { 14.0 }), Align2::CENTER_CENTER, "Вы транслируете", t::bold(if small { 13.0 } else { 15.0 }), t::TEXT);
+            painter.text(c - vec2(0.0, if small { 14.0 } else { 26.0 }), Align2::CENTER_CENTER, ph::MONITOR_ARROW_UP, t::font(if small { 26.0 } else { 40.0 }), t::p().accent);
+            painter.text(c + vec2(0.0, if small { 12.0 } else { 14.0 }), Align2::CENTER_CENTER, "Вы транслируете", t::bold(if small { 13.0 } else { 15.0 }), t::p().text);
             if !small {
-                painter.text(c + vec2(0.0, 36.0), Align2::CENTER_CENTER, ellipsize(&title, 40), t::font(13.0), t::TEXT_MUTED);
+                painter.text(c + vec2(0.0, 36.0), Align2::CENTER_CENTER, ellipsize(&title, 40), t::font(13.0), t::p().text_muted);
             }
         } else if watching {
             match self.video.frame(&p.identity) {
@@ -1174,16 +1174,16 @@ impl App {
                     egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).corner_radius(radius).paint_at(ui, vr);
                     self.mark_view(&p.identity, vr, ui.ctx().pixels_per_point());
                     if f.stale {
-                        chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Нет новых кадров — стример свернул окно или пропала связь", ph::HOURGLASS), t::TEXT_MUTED);
+                        chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Нет новых кадров — стример свернул окно или пропала связь", ph::HOURGLASS), t::p().text_muted);
                     }
                     if big && hovered && f.fps > 0.0 {
-                        chip(&painter, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, &format!("{}×{} · {:.0} к/с", f.size[0], f.size[1], f.fps), t::TEXT_MUTED);
+                        chip(&painter, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, &format!("{}×{} · {:.0} к/с", f.size[0], f.size[1], f.fps), t::p().text_muted);
                     }
                 }
                 None => {
                     self.mark_view(&p.identity, rect, ui.ctx().pixels_per_point());
-                    egui::Spinner::new().size(30.0).color(t::ACCENT).paint_at(ui, Rect::from_center_size(rect.center() - vec2(0.0, 12.0), vec2(30.0, 30.0)));
-                    painter.text(rect.center() + vec2(0.0, 22.0), Align2::CENTER_CENTER, "Подключаемся к трансляции…", t::font(13.0), t::TEXT_MUTED);
+                    egui::Spinner::new().size(30.0).color(t::p().accent).paint_at(ui, Rect::from_center_size(rect.center() - vec2(0.0, 12.0), vec2(30.0, 30.0)));
+                    painter.text(rect.center() + vec2(0.0, 22.0), Align2::CENTER_CENTER, "Подключаемся к трансляции…", t::font(13.0), t::p().text_muted);
                     ui.ctx().request_repaint_after(Duration::from_millis(50));
                 }
             }
@@ -1198,25 +1198,25 @@ impl App {
                 self.people.paint(&painter, ac, ar, &peer_user(&self.people, p), 0.0, false);
             }
             if !small {
-                painter.text(ac + vec2(0.0, ar + 18.0), Align2::CENTER_CENTER, format!("{} транслирует экран", peer_name(&self.people, p)), t::semibold(14.0), t::TEXT);
+                painter.text(ac + vec2(0.0, ar + 18.0), Align2::CENTER_CENTER, format!("{} транслирует экран", peer_name(&self.people, p)), t::semibold(14.0), t::p().text);
             }
             let bw = if small { 116.0 } else { 150.0 };
             let by = if tiny { rect.center().y - 4.0 } else { ac.y + ar + if small { 22.0 } else { 52.0 } };
             let br = Rect::from_center_size(pos2(rect.center().x, by), vec2(bw, if small { 30.0 } else { 38.0 }));
-            painter.rect_filled(br, CornerRadius::same(255), if hovered { t::ACCENT_BRIGHT } else { t::ACCENT });
-            painter.text(br.center(), Align2::CENTER_CENTER, format!("{}  Смотреть", ph::PLAY), t::bold(if small { 13.0 } else { 14.5 }), t::ON_ACCENT);
+            painter.rect_filled(br, CornerRadius::same(255), if hovered { t::p().accent_hover } else { t::p().accent });
+            painter.text(br.center(), Align2::CENTER_CENTER, format!("{}  Смотреть", ph::PLAY), t::bold(if small { 13.0 } else { 14.5 }), t::p().on_accent);
         }
 
         let stroke = if big || (watching && hovered) {
             Stroke::new(1.0, t::accent_a(120))
         } else if hovered {
-            Stroke::new(1.0, t::BORDER)
+            Stroke::new(1.0, t::p().border_strong)
         } else {
-            Stroke::new(1.0, t::BORDER_DIM)
+            Stroke::new(1.0, t::p().border)
         };
         painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
         live_badge(&painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
-        chip(&painter, rect.left_bottom() + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, peer_name(&self.people, p)), t::TEXT);
+        chip(&painter, rect.left_bottom() + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, peer_name(&self.people, p)), t::p().text);
 
         if p.is_local {
             return;
@@ -1381,12 +1381,12 @@ impl App {
                     egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).paint_at(ui, vr);
                     self.mark_view(&id, vr, ui.ctx().pixels_per_point());
                     if !idle {
-                        chip(ui.painter(), r.left_top() + vec2(20.0, 20.0), Align2::LEFT_TOP, &format!("{}  {} · {}×{} · {:.0} к/с", ph::MONITOR, p.name, f.size[0], f.size[1], f.fps), t::TEXT);
+                        chip(ui.painter(), r.left_top() + vec2(20.0, 20.0), Align2::LEFT_TOP, &format!("{}  {} · {}×{} · {:.0} к/с", ph::MONITOR, p.name, f.size[0], f.size[1], f.fps), t::p().text);
                     }
                 }
                 None => {
                     self.mark_view(&id, r, ui.ctx().pixels_per_point());
-                    egui::Spinner::new().size(36.0).color(t::ACCENT).paint_at(ui, Rect::from_center_size(r.center(), vec2(36.0, 36.0)));
+                    egui::Spinner::new().size(36.0).color(t::p().accent).paint_at(ui, Rect::from_center_size(r.center(), vec2(36.0, 36.0)));
                 }
             }
             if idle {
@@ -1399,7 +1399,7 @@ impl App {
                 return;
             }
             ui.ctx().request_repaint_after(Duration::from_millis(250));
-            chip(ui.painter(), pos2(r.center().x, r.top() + 20.0), Align2::CENTER_TOP, "Esc или двойной клик — выйти из полного экрана", t::TEXT_MUTED);
+            chip(ui.painter(), pos2(r.center().x, r.top() + 20.0), Align2::CENTER_TOP, "Esc или двойной клик — выйти из полного экрана", t::p().text_muted);
             let mut c = pos2(r.right() - 36.0, r.bottom() - 36.0);
             if overlay_button(ui, c, ph::X, "Перестать смотреть", Id::new("fs-stop")).clicked() {
                 self.unwatch(ui.ctx(), &id);
@@ -1419,12 +1419,12 @@ impl App {
                 .anchor(Align2::CENTER_BOTTOM, vec2(130.0, -96.0))
                 .show(ui.ctx(), |ui| {
                     let r = Frame::new()
-                        .fill(t::ERROR_BOX_BG)
-                        .stroke(Stroke::new(1.0, t::ERROR_BOX_BORDER))
+                        .fill(t::p().error_bg)
+                        .stroke(Stroke::new(1.0, t::p().error_border))
                         .corner_radius(CornerRadius::same(255))
                         .inner_margin(Margin::symmetric(16, 8))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(format!("{}  {n}   {}", ph::MONITOR, ph::X)).color(t::DANGER_TEXT).size(13.5));
+                            ui.label(RichText::new(format!("{}  {n}   {}", ph::MONITOR, ph::X)).color(t::p().danger_text).size(13.5));
                         })
                         .response
                         .interact(Sense::click());
@@ -1444,12 +1444,12 @@ impl App {
             .anchor(Align2::CENTER_TOP, vec2(130.0, 76.0))
             .show(ui.ctx(), |ui| {
                 Frame::new()
-                    .fill(t::WARN_BOX_BG)
-                    .stroke(Stroke::new(1.0, t::WARN_BOX_BORDER))
+                    .fill(t::p().warn_bg)
+                    .stroke(Stroke::new(1.0, t::p().warn_border))
                     .corner_radius(CornerRadius::same(255))
                     .inner_margin(Margin::symmetric(16, 8))
                     .show(ui, |ui| {
-                        ui.label(RichText::new(format!("{}  {text}", ph::ARROWS_CLOCKWISE)).color(t::ACCENT_BRIGHT).size(13.5));
+                        ui.label(RichText::new(format!("{}  {text}", ph::ARROWS_CLOCKWISE)).color(t::p().accent_hover).size(13.5));
                     });
             });
         let _ = screen;
@@ -1470,9 +1470,9 @@ impl App {
         let m = self.voice.state.lock().unwrap().metrics.clone();
         let mono = |s: String, c: Color32| RichText::new(s).monospace().size(12.0).color(c);
         let loss_color = |p: Option<f64>| match p {
-            Some(p) if p >= 5.0 => t::DANGER,
-            Some(p) if p >= 2.0 => t::ACCENT,
-            _ => t::TEXT,
+            Some(p) if p >= 5.0 => t::p().danger,
+            Some(p) if p >= 2.0 => t::p().accent,
+            _ => t::p().text,
         };
         let mut dump = false;
         egui::Area::new(Id::new("metrics-overlay"))
@@ -1481,60 +1481,60 @@ impl App {
             .show(ui.ctx(), |ui| {
                 Frame::new()
                     .fill(Color32::from_black_alpha(217))
-                    .stroke(Stroke::new(1.0, t::BORDER))
+                    .stroke(Stroke::new(1.0, t::p().border_strong))
                     .corner_radius(CornerRadius::same(6))
                     .inner_margin(Margin::same(10))
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(mono("F3 · метрики".into(), t::TEXT_MUTED));
+                        ui.label(mono("F3 · метрики".into(), t::p().text_muted));
                         let Some(m) = &m else {
-                            ui.label(mono("не в канале".into(), t::TEXT));
+                            ui.label(mono("не в канале".into(), t::p().text));
                             return;
                         };
                         let c = &m.conn;
                         let path_color = match c.path {
-                            Path::Relay { .. } => t::ACCENT,
-                            Path::Unknown => t::DANGER,
-                            Path::Direct { .. } => t::TEXT,
+                            Path::Relay { .. } => t::p().accent,
+                            Path::Unknown => t::p().danger,
+                            Path::Direct { .. } => t::p().text,
                         };
                         ui.horizontal(|ui| {
                             ui.label(mono(format!("путь  {}", c.path), path_color));
-                            ui.label(mono(format!("SFU {}", c.remote), t::TEXT_MUTED));
+                            ui.label(mono(format!("SFU {}", c.remote), t::p().text_muted));
                             if !c.turn.is_empty() {
-                                ui.label(mono(format!("через {}", c.turn), t::TEXT_MUTED));
+                                ui.label(mono(format!("через {}", c.turn), t::p().text_muted));
                             }
                             if m.forced_relay {
-                                ui.label(mono("FORCE RELAY".into(), t::DANGER));
+                                ui.label(mono("FORCE RELAY".into(), t::p().danger));
                             }
                         });
                         let rtt = c.rtt_ms.map_or("—".into(), |r| format!("{r:.0} мс"));
                         let avail = c.out_kbps_avail.map_or("—".into(), |k| format!("{:.1} Мбит/с", k / 1000.0));
-                        ui.label(mono(format!("RTT   {rtt}   канал ↑ {avail}"), t::TEXT));
+                        ui.label(mono(format!("RTT   {rtt}   канал ↑ {avail}"), t::p().text));
                         ui.add_space(4.0);
                         egui::Grid::new("metrics-rows").spacing(vec2(10.0, 1.0)).show(ui, |ui| {
                             for h in ["", "поток", "кбит/с", "потери", "джиттер", "кадры", ""] {
-                                ui.label(mono(h.into(), t::TEXT_MUTED));
+                                ui.label(mono(h.into(), t::p().text_muted));
                             }
                             ui.end_row();
                             for r in &m.rows {
                                 let arrow = if r.dir == Dir::Out { "↑" } else { "↓" };
-                                ui.label(mono(format!("{arrow} {}", if r.kind == "video" { "V" } else { "A" }), t::TEXT_MUTED));
-                                ui.label(mono(format!("{} {}", r.label, r.codec), t::TEXT));
-                                ui.label(mono(format!("{:>6.0}", r.kbps), t::TEXT));
+                                ui.label(mono(format!("{arrow} {}", if r.kind == "video" { "V" } else { "A" }), t::p().text_muted));
+                                ui.label(mono(format!("{} {}", r.label, r.codec), t::p().text));
+                                ui.label(mono(format!("{:>6.0}", r.kbps), t::p().text));
                                 ui.label(mono(r.loss_pct.map_or("—".into(), |p| format!("{p:.1}%")), loss_color(r.loss_pct)));
-                                ui.label(mono(r.jitter_ms.map_or("—".into(), |j| format!("{j:.0} мс")), t::TEXT));
+                                ui.label(mono(r.jitter_ms.map_or("—".into(), |j| format!("{j:.0} мс")), t::p().text));
                                 let frames = match (r.size, r.fps) {
                                     (Some((w, h)), Some(f)) => format!("{w}×{h} {f:.0}"),
                                     (None, Some(f)) => format!("{f:.0} к/с"),
                                     _ => String::new(),
                                 };
-                                ui.label(mono(frames, t::TEXT));
-                                ui.label(mono(r.detail.clone(), t::TEXT_MUTED));
+                                ui.label(mono(frames, t::p().text));
+                                ui.label(mono(r.detail.clone(), t::p().text_muted));
                                 ui.end_row();
                             }
                         });
                         if m.rows.is_empty() {
-                            ui.label(mono("потоков нет".into(), t::TEXT_MUTED));
+                            ui.label(mono("потоков нет".into(), t::p().text_muted));
                         }
                         ui.add_space(4.0);
                         if ui.small_button("Снимок статистики в лог").clicked() {
@@ -1559,8 +1559,8 @@ impl App {
         let mut s_changed = false;
         let area = egui::Area::new(Id::new("vol-popup")).order(egui::Order::Foreground).fixed_pos(pos + vec2(8.0, 8.0)).show(ui.ctx(), |ui| {
             Frame::new()
-                .fill(t::SURFACE_2)
-                .stroke(Stroke::new(1.0, t::BORDER))
+                .fill(t::p().surface_2)
+                .stroke(Stroke::new(1.0, t::p().border_strong))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(Margin::symmetric(16, 14))
                 .shadow(ui.visuals().popup_shadow)
@@ -1568,7 +1568,7 @@ impl App {
                     ui.set_width(250.0);
                     ui.label(RichText::new(&name).font(t::bold(14.0)));
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Громкость").size(13.0).color(t::TEXT_MUTED));
+                        ui.label(RichText::new("Громкость").size(13.0).color(t::p().text_muted));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(RichText::new(format!("{:.0}%", vol * 100.0)).size(13.0));
                         });
@@ -1584,7 +1584,7 @@ impl App {
                         changed = true;
                     }
                     if (vol - 1.0).abs() > 0.01 {
-                        let r = ui.add(egui::Label::new(RichText::new(format!("{}  Сбросить (100%)", ph::ARROW_COUNTER_CLOCKWISE)).size(13.5).color(t::TEXT_MUTED)).sense(Sense::click()));
+                        let r = ui.add(egui::Label::new(RichText::new(format!("{}  Сбросить (100%)", ph::ARROW_COUNTER_CLOCKWISE)).size(13.5).color(t::p().text_muted)).sense(Sense::click()));
                         if r.clicked() {
                             vol = 1.0;
                             changed = true;
@@ -1594,7 +1594,7 @@ impl App {
                     if streaming {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}  Звук трансляции", ph::MONITOR_PLAY)).size(13.0).color(t::TEXT_MUTED));
+                            ui.label(RichText::new(format!("{}  Звук трансляции", ph::MONITOR_PLAY)).size(13.0).color(t::p().text_muted));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(RichText::new(format!("{:.0}%", svol * 100.0)).size(13.0));
                             });
@@ -1727,11 +1727,11 @@ impl App {
         let in_call = self.voice.snapshot().channel.is_some();
         let mut close = false;
         let modal = egui::Modal::new(Id::new("update"))
-            .backdrop_color(t::SCRIM)
+            .backdrop_color(t::p().scrim)
             .frame(
                 Frame::new()
-                    .fill(t::SURFACE)
-                    .stroke(Stroke::new(1.0, t::BORDER))
+                    .fill(t::p().surface)
+                    .stroke(Stroke::new(1.0, t::p().border_strong))
                     .corner_radius(CornerRadius::same(14))
                     .inner_margin(Margin::symmetric(32, 28))
                     .shadow(ui.visuals().window_shadow),
@@ -1743,33 +1743,33 @@ impl App {
                 ui.label(
                     RichText::new(format!("Сейчас у вас {} · загрузка {:.0} МБ", update::CURRENT, info.size as f64 / 1_048_576.0))
                         .size(13.0)
-                        .color(t::TEXT_MUTED),
+                        .color(t::p().text_muted),
                 );
                 if !info.notes.trim().is_empty() {
                     ui.add_space(12.0);
-                    ui.label(RichText::new(info.notes.trim()).color(t::TEXT));
+                    ui.label(RichText::new(info.notes.trim()).color(t::p().text));
                 }
                 if in_call {
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new(format!("{}  Вы в голосовом канале — после перезапуска зайдите снова.", ph::INFO))
                             .size(13.0)
-                            .color(t::TEXT_MUTED),
+                            .color(t::p().text_muted),
                     );
                 }
                 if self.updater.installing {
                     ui.add_space(14.0);
                     ui.add(
                         egui::ProgressBar::new(self.updater.progress())
-                            .fill(t::ACCENT)
+                            .fill(t::p().accent)
                             .desired_height(8.0)
                             .corner_radius(CornerRadius::same(4)),
                     );
-                    ui.label(RichText::new("Скачиваю…").size(13.0).color(t::TEXT_MUTED));
+                    ui.label(RichText::new("Скачиваю…").size(13.0).color(t::p().text_muted));
                 }
                 if let Some(err) = &self.updater.error {
                     ui.add_space(10.0);
-                    ui.label(RichText::new(format!("{}  Не получилось: {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::DANGER_TEXT));
+                    ui.label(RichText::new(format!("{}  Не получилось: {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
                     if ui.link("Скачать установщик в браузере").clicked() {
                         desktop::open_url(&self.updater.installer_url());
                     }
@@ -1795,6 +1795,21 @@ impl App {
         ui.add_space(18.0);
         ui.label(RichText::new("Приложение").font(t::bold(15.0)));
         ui.add_space(4.0);
+        toggle_row(ui, w, |ui| {
+            ui.label("Тема");
+        }, |ui| {
+            let mut pref = self.settings.theme;
+            egui::ComboBox::from_id_salt("theme-pref").selected_text(pref.label()).width(190.0).show_ui(ui, |ui| {
+                for v in ThemePref::ALL {
+                    ui.selectable_value(&mut pref, v, v.label());
+                }
+            });
+            if pref != self.settings.theme {
+                self.settings.theme = pref;
+                self.settings.save();
+                t::set_theme(ui.ctx(), pref);
+            }
+        });
         let installed = desktop::is_installed();
         let mut autostart = self.settings.autostart;
         toggle_row(ui, w, |ui| {
@@ -1812,7 +1827,7 @@ impl App {
             });
         });
         if let Some(e) = &self.autostart_error {
-            ui.label(RichText::new(format!("Автозапуск: {e}")).size(12.5).color(t::DANGER_TEXT));
+            ui.label(RichText::new(format!("Автозапуск: {e}")).size(12.5).color(t::p().danger_text));
         }
         let mut to_tray = self.settings.close_to_tray;
         toggle_row(ui, w, |ui| {
@@ -1825,16 +1840,16 @@ impl App {
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Версия {}", update::CURRENT)).color(t::TEXT));
+            ui.label(RichText::new(format!("Версия {}", update::CURRENT)).color(t::p().text));
             let u = &self.updater;
             let status = if u.checking {
-                RichText::new("проверяю…").color(t::TEXT_MUTED)
+                RichText::new("проверяю…").color(t::p().text_muted)
             } else if let Some(i) = &u.available {
-                RichText::new(format!("доступна {}", i.version)).color(t::ACCENT)
+                RichText::new(format!("доступна {}", i.version)).color(t::p().accent)
             } else if let Some(e) = &u.error {
-                RichText::new(e.clone()).color(t::DANGER_TEXT)
+                RichText::new(e.clone()).color(t::p().danger_text)
             } else if u.checked_once {
-                RichText::new("последняя").color(t::TEXT_MUTED)
+                RichText::new("последняя").color(t::p().text_muted)
             } else {
                 RichText::new("")
             };
@@ -1871,7 +1886,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.add_space(6.0);
                 ui.label(RichText::new(people::public(&me).shown_name()).font(t::bold(16.0)));
-                ui.label(RichText::new(format!("логин: {}", me.name)).size(13.0).color(t::TEXT_MUTED));
+                ui.label(RichText::new(format!("логин: {}", me.name)).size(13.0).color(t::p().text_muted));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!busy, egui::Button::new(format!("{} Сменить аватар…", ph::IMAGE))).clicked() {
@@ -1903,10 +1918,10 @@ impl App {
             }
         });
         if busy {
-            ui.label(RichText::new("Сохраняю…").size(13.0).color(t::TEXT_MUTED));
+            ui.label(RichText::new("Сохраняю…").size(13.0).color(t::p().text_muted));
         }
         if let Some(e) = &self.profile_error {
-            ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(t::DANGER_TEXT));
+            ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
         }
     }
 
@@ -1944,11 +1959,11 @@ impl App {
         ui.ctx().request_repaint_after(Duration::from_millis(50)); // живой индикатор уровня
         let mut close = false;
         let modal = egui::Modal::new(Id::new("settings"))
-            .backdrop_color(t::SCRIM)
+            .backdrop_color(t::p().scrim)
             .frame(
                 Frame::new()
-                    .fill(t::SURFACE)
-                    .stroke(Stroke::new(1.0, t::BORDER))
+                    .fill(t::p().surface)
+                    .stroke(Stroke::new(1.0, t::p().border_strong))
                     .corner_radius(CornerRadius::same(14))
                     .inner_margin(Margin::symmetric(32, 28))
                     .shadow(ui.visuals().window_shadow),
@@ -1962,7 +1977,7 @@ impl App {
                     ui.label(RichText::new("Голос и звук").font(t::xbold(20.0)));
                     ui.add_space(14.0);
                     if let Some(err) = &vs.audio_error {
-                        ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::DANGER_TEXT));
+                        ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
                     }
 
                     label(ui, "Микрофон");
@@ -1985,15 +2000,15 @@ impl App {
                         } else {
                             (format!("{}  Слышать себя", ph::HEADPHONES), false)
                         };
-                        let btn = egui::Button::new(RichText::new(text).color(if active { t::ON_ACCENT } else { t::TEXT }))
-                            .fill(if active { t::ACCENT } else { t::SURFACE_2 });
+                        let btn = egui::Button::new(RichText::new(text).color(if active { t::p().on_accent } else { t::p().text }))
+                            .fill(if active { t::p().accent } else { t::p().surface_2 });
                         if ui.add(btn).clicked() {
                             self.mic_playback = !self.mic_playback;
                         }
                         let hint = match &self.mic_test_error {
-                            Some(e) => RichText::new(format!("Проверка недоступна: {e}")).color(t::DANGER_TEXT),
-                            None if self.mic_playback => RichText::new("Так вас слышат друзья. Наденьте наушники — на колонках будет заводка.").color(t::TEXT_MUTED),
-                            None => RichText::new("Голос с шумоподавлением, как в звонке. Лучше в наушниках.").color(t::TEXT_MUTED),
+                            Some(e) => RichText::new(format!("Проверка недоступна: {e}")).color(t::p().danger_text),
+                            None if self.mic_playback => RichText::new("Так вас слышат друзья. Наденьте наушники — на колонках будет заводка.").color(t::p().text_muted),
+                            None => RichText::new("Голос с шумоподавлением, как в звонке. Лучше в наушниках.").color(t::p().text_muted),
                         };
                         ui.label(hint.size(12.5));
                     });
@@ -2024,7 +2039,7 @@ impl App {
                             if ui.button("Отмена").clicked() {
                                 self.ptt.cancel_capture();
                             }
-                            ui.label(RichText::new("нажмите клавишу…").color(t::ACCENT).size(13.0));
+                            ui.label(RichText::new("нажмите клавишу…").color(t::p().accent).size(13.0));
                         } else {
                             let r = t::keycap(ui, &ptt::key_name(self.settings.ptt_key)).interact(Sense::click());
                             if r.on_hover_text("Нажмите, чтобы назначить другую клавишу (можно кнопку мыши)").clicked() {
@@ -2091,9 +2106,9 @@ impl App {
                     let me = self.me.clone();
                     ui.horizontal(|ui| {
                         if let Some(u) = &me {
-                            ui.label(RichText::new(format!("{}{}", u.name, if u.is_admin { " · администратор" } else { "" })).color(t::TEXT));
+                            ui.label(RichText::new(format!("{}{}", u.name, if u.is_admin { " · администратор" } else { "" })).color(t::p().text));
                         }
-                        ui.label(RichText::new(format!("· {}", self.settings.server_url)).size(13.0).color(t::TEXT_MUTED));
+                        ui.label(RichText::new(format!("· {}", self.settings.server_url)).size(13.0).color(t::p().text_muted));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.button(format!("{} Выйти", ph::SIGN_OUT)).clicked() {
                                 close = true;
@@ -2120,10 +2135,10 @@ impl App {
                                     }
                                 }
                                 Some(Err(e)) => {
-                                    ui.label(RichText::new(e).size(13.0).color(t::DANGER_TEXT));
+                                    ui.label(RichText::new(e).size(13.0).color(t::p().danger_text));
                                 }
                                 None => {
-                                    ui.label(RichText::new("1 вход, 7 дней").size(13.0).color(t::TEXT_MUTED));
+                                    ui.label(RichText::new("1 вход, 7 дней").size(13.0).color(t::p().text_muted));
                                 }
                             }
                         });
@@ -2201,6 +2216,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // Тема: «Как в Windows» следит за системой на лету.
+        if !std::ptr::eq(t::resolve(self.settings.theme, ui.ctx().system_theme()), t::p()) {
+            t::set_theme(ui.ctx(), self.settings.theme);
+        }
         self.handle_msgs();
         self.chat.poll();
         for u in self.chat.take_users() {
@@ -2254,7 +2273,7 @@ impl eframe::App for App {
         if self.fullscreen {
             return Color32::BLACK.to_normalized_gamma_f32();
         }
-        t::BG.to_normalized_gamma_f32()
+        t::p().bg.to_normalized_gamma_f32()
     }
 }
 
@@ -2363,13 +2382,13 @@ fn overlay_button(ui: &Ui, center: Pos2, icon: &str, tip: &str, id: Id) -> egui:
     let hot = resp.hovered();
     let p = ui.painter();
     p.circle_filled(center, 18.0, t::overlay_dark(if hot { 235 } else { 170 }));
-    p.circle_stroke(center, 18.0, Stroke::new(1.0, if hot { t::accent_a(160) } else { t::BORDER }));
-    p.text(center, Align2::CENTER_CENTER, icon, t::font(18.0), if hot { t::ACCENT_BRIGHT } else { t::TEXT });
+    p.circle_stroke(center, 18.0, Stroke::new(1.0, if hot { t::accent_a(160) } else { t::p().border_strong }));
+    p.text(center, Align2::CENTER_CENTER, icon, t::font(18.0), if hot { t::p().accent_hover } else { t::p().text });
     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(13.0).color(t::TEXT_MUTED));
+    ui.label(RichText::new(text).size(13.0).color(t::p().text_muted));
 }
 
 fn field(text: &mut String, w: f32) -> TextEdit<'_> {
@@ -2380,7 +2399,7 @@ fn group_label(ui: &mut Ui, text: &str) {
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         ui.add_space(18.0);
-        ui.label(RichText::new(text).font(t::semibold(12.5)).color(t::TEXT_MUTED));
+        ui.label(RichText::new(text).font(t::semibold(12.5)).color(t::p().text_muted));
     });
     ui.add_space(4.0);
 }
@@ -2391,15 +2410,15 @@ fn channel_row(ui: &mut Ui, icon: &str, name: &str, active: bool, count: Option<
     let rect = Rect::from_min_max(outer.min + vec2(10.0, 0.0), outer.max - vec2(10.0, 0.0));
     let p = ui.painter();
     if active {
-        p.rect_filled(rect, CornerRadius::same(7), t::SURFACE_2);
+        p.rect_filled(rect, CornerRadius::same(7), t::p().surface_2);
     } else if resp.hovered() && enabled {
-        p.rect_filled(rect, CornerRadius::same(7), t::SURFACE_ACTIVE);
+        p.rect_filled(rect, CornerRadius::same(7), t::p().row_active);
     }
-    let color = if active || (resp.hovered() && enabled) { t::TEXT } else if enabled { t::TEXT_MUTED } else { t::TEXT_MUTED.gamma_multiply(0.6) };
+    let color = if active || (resp.hovered() && enabled) { t::p().text } else if enabled { t::p().text_muted } else { t::p().text_muted.gamma_multiply(0.6) };
     p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, icon, t::font(20.0), color);
     p.text(rect.left_center() + vec2(40.0, 0.0), Align2::LEFT_CENTER, name, t::semibold(15.0), color);
     if let Some(n) = count {
-        p.text(rect.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, n.to_string(), t::font(12.0), t::TEXT_MUTED);
+        p.text(rect.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, n.to_string(), t::font(12.0), t::p().text_muted);
     }
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
@@ -2426,15 +2445,15 @@ fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
     let c = pos2(rect.left() + 48.0 + 11.0, rect.center().y);
     let u = peer_user(people, p);
     people.paint(painter, c, 11.0, &u, glow * 0.7, false);
-    let color = if glow > 0.05 { t::TEXT } else { t::TEXT_MUTED };
+    let color = if glow > 0.05 { t::p().text } else { t::p().text_muted };
     painter.text(pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, u.shown_name(), t::font(13.5), color);
     let mut x = rect.right() - 22.0;
     if p.mic_muted {
-        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::DANGER);
+        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::p().danger);
         x -= 20.0;
     }
     if p.streaming {
-        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::ACCENT);
+        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::p().accent);
     }
 }
 
@@ -2448,50 +2467,50 @@ fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32, people: &People) {
     let u = peer_user(people, p);
     let painter = ui.painter();
     let talk = glow > 0.05;
-    painter.rect_filled(rect, CornerRadius::same(12), t::SURFACE);
+    painter.rect_filled(rect, CornerRadius::same(12), t::p().surface);
     if talk {
         let c = rect.center() - vec2(0.0, rect.height() * 0.05);
         t::radial_glow(painter, c, rect.width().min(rect.height()) * 0.7, t::accent_a((32.0 * glow) as u8));
     }
-    let stroke = if talk { Stroke::new(1.0, t::accent_a((140.0 * glow) as u8 + 20)) } else { Stroke::new(1.0, t::BORDER_DIM) };
+    let stroke = if talk { Stroke::new(1.0, t::accent_a((140.0 * glow) as u8 + 20)) } else { Stroke::new(1.0, t::p().border) };
     painter.rect_stroke(rect, CornerRadius::same(12), stroke, StrokeKind::Inside);
     let r = (rect.height().min(rect.width()) * 0.22).clamp(24.0, 46.0);
     let ac = rect.center() - vec2(0.0, r * 0.35);
     people.paint(painter, ac, r, &u, glow, p.mic_muted && !p.is_local);
     let name_pos = pos2(rect.center().x, ac.y + r + 18.0);
-    let galley = painter.layout_no_wrap(u.shown_name().to_string(), t::bold(15.0), t::TEXT);
+    let galley = painter.layout_no_wrap(u.shown_name().to_string(), t::bold(15.0), t::p().text);
     let icon_w = if p.mic_muted { 24.0 } else { 0.0 };
     let start = name_pos.x - (galley.size().x + icon_w) / 2.0;
-    painter.galley(pos2(start, name_pos.y - galley.size().y / 2.0), galley.clone(), t::TEXT);
+    painter.galley(pos2(start, name_pos.y - galley.size().y / 2.0), galley.clone(), t::p().text);
     if p.mic_muted {
         painter.text(
             pos2(start + galley.size().x + 8.0, name_pos.y),
             Align2::LEFT_CENTER,
             egui_phosphor::fill::MICROPHONE_SLASH,
             t::icon_fill(16.0),
-            t::DANGER,
+            t::p().danger,
         );
     }
     if p.streaming {
         live_badge(painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
     }
     if p.is_local {
-        let tag = painter.layout_no_wrap("это вы".into(), t::font(12.0), t::TEXT_MUTED);
+        let tag = painter.layout_no_wrap("это вы".into(), t::font(12.0), t::p().text_muted);
         let tr = Rect::from_min_size(rect.min + vec2(12.0, 12.0), tag.size() + vec2(16.0, 6.0));
-        painter.rect_filled(tr, CornerRadius::same(6), t::BG);
-        painter.galley(tr.min + vec2(8.0, 3.0), tag, t::TEXT_MUTED);
+        painter.rect_filled(tr, CornerRadius::same(6), t::p().bg);
+        painter.galley(tr.min + vec2(8.0, 3.0), tag, t::p().text_muted);
     }
 }
 
 /// Плашка «В ЭФИРЕ» (правый верхний угол = `right_top`).
 fn live_badge(painter: &egui::Painter, right_top: Pos2) {
-    let galley = painter.layout_no_wrap("В ЭФИРЕ".into(), t::bold(11.0), t::ON_ACCENT);
+    let galley = painter.layout_no_wrap("В ЭФИРЕ".into(), t::bold(11.0), t::p().on_accent);
     let size = galley.size() + vec2(24.0, 8.0);
     let r = Rect::from_min_size(pos2(right_top.x - size.x, right_top.y), size);
     painter.rect_filled(r.expand(3.0), CornerRadius::same(9), t::accent_a(30));
-    painter.rect_filled(r, CornerRadius::same(6), t::ACCENT);
-    painter.circle_filled(pos2(r.left() + 9.0, r.center().y), 3.0, t::ON_ACCENT);
-    painter.galley(pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, t::ON_ACCENT);
+    painter.rect_filled(r, CornerRadius::same(6), t::p().accent);
+    painter.circle_filled(pos2(r.left() + 9.0, r.center().y), 3.0, t::p().on_accent);
+    painter.galley(pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, t::p().on_accent);
 }
 
 /// Статус своей трансляции в шапке: источник, качество, факт к/с и битрейт, энкодер.
@@ -2507,24 +2526,24 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 // right_to_left родитель — порядок обратный
                 if s.minimized {
-                    ui.label(RichText::new("окно свёрнуто").size(12.5).color(t::DANGER_TEXT));
+                    ui.label(RichText::new("окно свёрнуто").size(12.5).color(t::p().danger_text));
                 } else if s.fps > 0.0 {
-                    ui.label(RichText::new(format!("{:.0} к/с · {:.1} Мбит/с", s.fps, s.kbps / 1000.0)).size(12.5).color(t::TEXT_MUTED));
+                    ui.label(RichText::new(format!("{:.0} к/с · {:.1} Мбит/с", s.fps, s.kbps / 1000.0)).size(12.5).color(t::p().text_muted));
                 }
                 // Чем кодируется — видно сразу, без наведения.
-                let (tag, color) = if s.backend.contains("видеокарта") { ("видеокарта", t::ACCENT) } else { ("процессор", t::TEXT_MUTED) };
+                let (tag, color) = if s.backend.contains("видеокарта") { ("видеокарта", t::p().accent) } else { ("процессор", t::p().text_muted) };
                 ui.label(RichText::new(tag).size(12.0).color(color));
                 match &s.audio {
                     voice::AudioStatus::On(_) => {
-                        ui.label(RichText::new(egui_phosphor::regular::SPEAKER_HIGH).font(t::font(14.0)).color(t::ACCENT));
+                        ui.label(RichText::new(egui_phosphor::regular::SPEAKER_HIGH).font(t::font(14.0)).color(t::p().accent));
                     }
                     voice::AudioStatus::Failed(_) => {
-                        ui.label(RichText::new(egui_phosphor::regular::SPEAKER_X).font(t::font(14.0)).color(t::DANGER_TEXT));
+                        ui.label(RichText::new(egui_phosphor::regular::SPEAKER_X).font(t::font(14.0)).color(t::p().danger_text));
                     }
                     voice::AudioStatus::Off => {}
                 }
-                ui.label(RichText::new(&title).font(t::semibold(13.0)).color(t::ACCENT_BRIGHT));
-                ui.label(RichText::new(egui_phosphor::fill::MONITOR_ARROW_UP).font(t::icon_fill(15.0)).color(t::ACCENT));
+                ui.label(RichText::new(&title).font(t::semibold(13.0)).color(t::p().accent_hover));
+                ui.label(RichText::new(egui_phosphor::fill::MONITOR_ARROW_UP).font(t::icon_fill(15.0)).color(t::p().accent));
             });
         })
         .response;
@@ -2545,16 +2564,16 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
 
 fn ping_box(ui: &mut Ui, rtt: f64) {
     Frame::new()
-        .fill(t::SURFACE_DEEP)
-        .stroke(Stroke::new(1.0, t::BORDER))
+        .fill(t::p().bg)
+        .stroke(Stroke::new(1.0, t::p().border_strong))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin { left: 12, right: 12, top: 2, bottom: 2 })
         .show(ui, |ui| {
             // Родитель — right_to_left (прижато к правому краю), поэтому порядок обратный: подпись, затем число.
             ui.horizontal(|ui| {
                 let text = format!("{:.3}", rtt.min(9.999));
-                let num_w = ui.painter().layout_no_wrap(text.clone(), t::display_font(28.0), t::ACCENT).size().x;
-                ui.label(RichText::new("пинг, с").size(12.0).color(t::TEXT_MUTED));
+                let num_w = ui.painter().layout_no_wrap(text.clone(), t::display_font(28.0), t::p().accent).size().x;
+                ui.label(RichText::new("пинг, с").size(12.0).color(t::p().text_muted));
                 let (rect, _) = ui.allocate_exact_size(vec2(num_w + 4.0, 34.0), Sense::hover());
                 t::glow_text(ui.painter(), rect.left_center(), Align2::LEFT_CENTER, &text, 28.0);
             });
@@ -2590,16 +2609,16 @@ fn level_meter(ui: &mut Ui, level: Option<f32>, w: f32) {
         let r = Rect::from_min_size(rect.min + vec2(i as f32 * (seg + gap), 0.0), vec2(seg, 14.0));
         if i < lit {
             p.rect_filled(r.expand(1.5), CornerRadius::same(3), t::accent_a(50));
-            p.rect_filled(r, CornerRadius::same(2), t::ACCENT);
+            p.rect_filled(r, CornerRadius::same(2), t::p().accent);
         } else {
-            p.rect_filled(r, CornerRadius::same(2), t::TRACK);
+            p.rect_filled(r, CornerRadius::same(2), t::p().surface_3);
         }
     }
 }
 
 fn toggle_row(ui: &mut Ui, w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
     let top = ui.cursor().top();
-    ui.painter().hline(ui.max_rect().left()..=ui.max_rect().left() + w, top, Stroke::new(1.0, t::BORDER_DIM));
+    ui.painter().hline(ui.max_rect().left()..=ui.max_rect().left() + w, top, Stroke::new(1.0, t::p().border));
     ui.add_space(4.0);
     ui.allocate_ui_with_layout(vec2(w, 36.0), Layout::left_to_right(Align::Center), |ui| {
         left(ui);
