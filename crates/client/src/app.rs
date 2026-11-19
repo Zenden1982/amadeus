@@ -323,6 +323,7 @@ impl App {
             msg(2, (3, "kurisu"), "Я после пар, часов в восемь.", 40),
             msg(3, (1, "tester"), "Го в катку через 5 минут?", 2),
         ]);
+        self.chat.demo_seed(4, Vec::new());
         if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
             self.view = View::Text(id);
         }

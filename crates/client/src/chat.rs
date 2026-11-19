@@ -673,10 +673,10 @@ impl Chat {
                     let area = Rect::from_center_size(r.center(), vec2(460.0, 110.0));
                     let mut retry = false;
                     ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                        kit::notice(ui, kit::Notice::Error, &e, false);
+                        ui.add_space(10.0);
                         ui.vertical_centered(|ui| {
-                            ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).color(t::p().danger_text));
-                            ui.add_space(8.0);
-                            retry = ui.button("Повторить").clicked();
+                            retry = kit::button(ui, kit::ButtonKind::Primary, "Повторить", Some(egui_phosphor::fill::ARROW_CLOCKWISE)).clicked();
                         });
                     });
                     if retry {
@@ -719,7 +719,11 @@ impl Chat {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.add_space(12.0);
-                if reached_start {
+                if reached_start && msgs.is_empty() && outbox.is_empty() {
+                    // Пустой канал — кот и приглашение написать первым.
+                    ui.add_space((ui.available_height() * 0.25).max(20.0));
+                    kit::empty_state(ui, kit::MascotPose::Sitting, "Пока пусто", &format!("Напиши первым в #{}", ch.name), None);
+                } else if reached_start {
                     channel_intro(ui, &ch.name);
                 } else {
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
@@ -831,7 +835,7 @@ impl Chat {
         let row = Rect::from_min_max(pos2(start.x, start.y - top_pad / 2.0), pos2(start.x + full_w, inner.response.rect.bottom() + 2.0));
         let hovered = ui.rect_contains_pointer(row);
         if hovered {
-            ui.painter().set(bg_idx, egui::Shape::rect_filled(row, CornerRadius::same(6), t::p().row_hover));
+            ui.painter().set(bg_idx, egui::Shape::rect_filled(row, CornerRadius::same(kit::R_ROW), t::p().row_hover));
         }
         let p = ui.painter();
         if !grouped {
@@ -853,16 +857,16 @@ impl Chat {
         let mut act = None;
         match self.images.get(&a.id) {
             Some(Img::Ready(tex)) => {
-                egui::Image::new(tex).corner_radius(CornerRadius::same(8)).paint_at(ui, rect);
+                egui::Image::new(tex).corner_radius(CornerRadius::same(kit::R_ROW)).paint_at(ui, rect);
                 if resp.hovered() {
-                    p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, t::p().border_strong), StrokeKind::Inside);
+                    p.rect_stroke(rect, CornerRadius::same(kit::R_ROW), Stroke::new(2.0, t::p().accent), StrokeKind::Inside);
                 }
                 if resp.clicked() {
                     act = Some(FeedAct::Open(a.id));
                 }
             }
             Some(Img::Failed(e)) => {
-                p.rect(rect, CornerRadius::same(8), t::p().surface, Stroke::new(1.0, t::p().border), StrokeKind::Inside);
+                p.rect(rect, CornerRadius::same(kit::R_ROW), t::p().surface_2, Stroke::new(1.0, t::p().border), StrokeKind::Inside);
                 p.text(rect.center(), Align2::CENTER_CENTER, format!("{}  не загрузилась", ph::IMAGE_BROKEN), t::font(13.0), t::p().danger_text);
                 let tip = format!("{e}\nНажмите, чтобы повторить");
                 if resp.clicked() {
@@ -871,21 +875,21 @@ impl Chat {
                 resp.clone().on_hover_text(tip);
             }
             _ => {
-                p.rect(rect, CornerRadius::same(8), t::p().surface, Stroke::new(1.0, t::p().border), StrokeKind::Inside);
+                p.rect(rect, CornerRadius::same(kit::R_ROW), t::p().surface_2, Stroke::new(1.0, t::p().border), StrokeKind::Inside);
                 egui::Spinner::new().size(20.0).color(t::p().text_muted).paint_at(ui, Rect::from_center_size(rect.center(), vec2(20.0, 20.0)));
             }
         }
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         resp.context_menu(|ui| {
-            if ui.button(format!("{}  Открыть", ph::ARROWS_OUT)).clicked() {
+            if kit::menu_item(ui, egui_phosphor::fill::ARROWS_OUT, "Открыть", false).clicked() {
                 act = Some(FeedAct::Open(a.id));
                 ui.close();
             }
-            if ui.button(format!("{}  Скопировать", ph::COPY)).clicked() {
+            if kit::menu_item(ui, egui_phosphor::fill::COPY, "Скопировать", false).clicked() {
                 act = Some(FeedAct::Copy(a.id));
                 ui.close();
             }
-            if ui.button(format!("{}  Сохранить как…", ph::DOWNLOAD_SIMPLE)).clicked() {
+            if kit::menu_item(ui, egui_phosphor::fill::DOWNLOAD_SIMPLE, "Сохранить как…", false).clicked() {
                 act = Some(FeedAct::Save(a.clone()));
                 ui.close();
             }
@@ -904,10 +908,10 @@ impl Chat {
             });
         }
         Frame::new()
-            .fill(t::p().surface_2)
-            .stroke(Stroke::new(1.0, if ui.memory(|m| m.has_focus(id)) { t::p().border_strong } else { t::p().border }))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin { left: 6, right: 6, top: 3, bottom: 3 })
+            .fill(t::p().surface)
+            .stroke(Stroke::new(1.0, if ui.memory(|m| m.has_focus(id)) { t::p().accent.gamma_multiply(0.7) } else { t::p().border }))
+            .corner_radius(CornerRadius::same(kit::R_CARD))
+            .inner_margin(Margin { left: 8, right: 8, top: 5, bottom: 5 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if !d.images.is_empty() {
@@ -1117,8 +1121,8 @@ fn channel_intro(ui: &mut Ui, name: &str) {
         ui.add_space(16.0);
         ui.vertical(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
-            ui.painter().circle_filled(r.center(), 32.0, t::p().surface_2);
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, ph::HASH, t::font(34.0), t::p().text);
+            ui.painter().circle_filled(r.center(), 32.0, t::p().accent_soft);
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, egui_phosphor::fill::HASH, t::icon_fill(32.0), t::p().accent);
             ui.add_space(6.0);
             ui.label(RichText::new(format!("Добро пожаловать в #{name}")).font(t::xbold(24.0)));
             ui.label(RichText::new(format!("Это начало канала #{name}.")).size(14.0).color(t::p().text_muted));
@@ -1132,11 +1136,13 @@ fn day_separator(ui: &mut Ui, ts: i64) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
     let p = ui.painter();
     let label = day_label(ts);
-    let g = p.layout_no_wrap(label, t::semibold(12.0), t::p().text_muted);
+    let g = p.layout_no_wrap(label, t::bold(12.0), t::p().text_muted);
     let c = r.center();
-    let half = g.size().x / 2.0 + 10.0;
+    let half = g.size().x / 2.0 + 14.0;
     p.hline(r.left() + 16.0..=c.x - half, c.y, Stroke::new(1.0, t::p().border));
     p.hline(c.x + half..=r.right() - 16.0, c.y, Stroke::new(1.0, t::p().border));
+    let pill = Rect::from_center_size(c, g.size() + vec2(18.0, 6.0));
+    p.rect_filled(pill, CornerRadius::same(255), t::p().surface_3);
     p.galley(c - g.size() / 2.0, g, t::p().text_muted);
 }
 
