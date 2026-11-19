@@ -23,7 +23,8 @@ use crate::mictest::{self, MicTest};
 use crate::people::{self, People};
 use crate::picker::{self, Picker};
 use crate::ptt::{self, Ptt};
-use crate::theme::{self as t, DockStyle};
+use crate::kit::{self, DockStyle};
+use crate::theme as t;
 use crate::video::VideoHub;
 use crate::voice::{self, AudioPrefs, Cmd, Conn, Peer, VoiceHandle, VoiceState};
 
@@ -671,7 +672,7 @@ impl App {
                 (false, Tab::Login) => "Войти",
                 (false, Tab::Invite) => "Создать аккаунт",
             };
-            if t::primary_button(ui, text, w, !self.login.busy).clicked() {
+            if kit::button_wide(ui, kit::ButtonKind::Primary, text, w, !self.login.busy).clicked() {
                 submit = true;
             }
         });
@@ -990,16 +991,16 @@ impl App {
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                if t::icon_button(ui, ph::GEAR_SIX, false, false, "Настройки").clicked() {
+                if kit::icon_button(ui, ph::GEAR_SIX, kit::IconState::Normal, "Настройки").clicked() {
                     self.open_settings();
                 }
                 let (icon, tip) = if vs.deafened { (ph::SPEAKER_SLASH, "Включить звук") } else { (ph::HEADPHONES, "Выключить звук") };
-                if t::icon_button(ui, icon, vs.deafened, vs.deafened, tip).clicked() {
+                if kit::icon_button(ui, icon, if vs.deafened { kit::IconState::Off } else { kit::IconState::Normal }, tip).clicked() {
                     self.voice.send(Cmd::SetDeafened(!vs.deafened));
                 }
                 let mic_off = vs.self_muted || vs.deafened;
                 let (icon, tip) = if mic_off { (ph::MICROPHONE_SLASH, "Включить микрофон") } else { (ph::MICROPHONE, "Выключить микрофон") };
-                if t::icon_button(ui, icon, mic_off, mic_off, tip).clicked() {
+                if kit::icon_button(ui, icon, if mic_off { kit::IconState::Off } else { kit::IconState::Normal }, tip).clicked() {
                     self.voice.send(Cmd::SetSelfMuted(!mic_off));
                 }
             });
@@ -1087,34 +1088,34 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(((r.width() - est) / 2.0).max(12.0));
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    if t::dock_button(ui, mic_icon, "Микрофон", mic_style).clicked() {
+                    if kit::dock_button(ui, mic_icon, "Микрофон", mic_style).clicked() {
                         self.voice.send(Cmd::SetSelfMuted(!mic_off));
                     }
-                    if t::dock_button(ui, snd_icon, "Звук", snd_style).clicked() {
+                    if kit::dock_button(ui, snd_icon, "Звук", snd_style).clicked() {
                         self.voice.send(Cmd::SetDeafened(!vs.deafened));
                     }
                     if vs.ptt_enabled {
                         ui.add_space(4.0);
                         ui.label(RichText::new("Рация: держите").size(13.0).color(t::p().text_muted));
-                        t::keycap(ui, &key);
+                        kit::keycap(ui, &key);
                         ui.add_space(4.0);
                     }
                     if streaming {
-                        if t::dock_button(ui, ph::MONITOR_ARROW_UP, "Остановить", DockStyle::Live)
+                        if kit::dock_button(ui, ph::MONITOR_ARROW_UP, "Остановить", DockStyle::Live)
                             .on_hover_text("Остановить трансляцию")
                             .clicked()
                         {
                             self.voice.send(Cmd::StopStream);
                         }
-                        if t::dock_button(ui, ph::SWAP, "Сменить", DockStyle::Normal).on_hover_text("Сменить окно или экран без остановки").clicked() {
+                        if kit::dock_button(ui, ph::SWAP, "Сменить", DockStyle::Normal).on_hover_text("Сменить окно или экран без остановки").clicked() {
                             self.open_picker(vs);
                         }
                     } else if can_stream
-                        && t::dock_button(ui, ph::MONITOR_ARROW_UP, "Экран", DockStyle::Normal).on_hover_text("Показать окно или экран").clicked()
+                        && kit::dock_button(ui, ph::MONITOR_ARROW_UP, "Экран", DockStyle::Normal).on_hover_text("Показать окно или экран").clicked()
                     {
                         self.open_picker(vs);
                     }
-                    if in_room && t::dock_button(ui, ph::PHONE_X, "Отключиться", DockStyle::Leave).clicked() {
+                    if in_room && kit::dock_button(ui, ph::PHONE_X, "Отключиться", DockStyle::Leave).clicked() {
                         self.voice.send(Cmd::Leave);
                     }
                 });
@@ -1629,7 +1630,7 @@ impl App {
                             ui.label(RichText::new(format!("{:.0}%", vol * 100.0)).size(13.0));
                         });
                     });
-                    if t::slider(ui, &mut vol, 0.0..=2.0, 250.0).changed() {
+                    if kit::slider(ui, &mut vol, 0.0..=2.0, 250.0).changed() {
                         changed = true;
                     }
                     ui.add_space(4.0);
@@ -1655,7 +1656,7 @@ impl App {
                                 ui.label(RichText::new(format!("{:.0}%", svol * 100.0)).size(13.0));
                             });
                         });
-                        if t::slider(ui, &mut svol, 0.0..=2.0, 250.0).changed() {
+                        if kit::slider(ui, &mut svol, 0.0..=2.0, 250.0).changed() {
                             s_changed = true;
                         }
                     }
@@ -1833,7 +1834,7 @@ impl App {
                 ui.add_space(20.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                     let busy = self.updater.installing || self.updater.ready;
-                    if t::primary_button(ui, "Обновить и перезапустить", 230.0, !busy).clicked() {
+                    if kit::button_wide(ui, kit::ButtonKind::Primary, "Обновить и перезапустить", 230.0, !busy).clicked() {
                         self.updater.install();
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Позже")).clicked() {
@@ -1875,7 +1876,7 @@ impl App {
             }
         }, |ui| {
             ui.add_enabled_ui(installed, |ui| {
-                if t::switch(ui, &mut autostart).changed() {
+                if kit::switch(ui, &mut autostart).changed() {
                     self.settings.autostart = autostart;
                     self.settings.save();
                     self.autostart_error = desktop::set_autostart(autostart).err();
@@ -1889,7 +1890,7 @@ impl App {
         toggle_row(ui, w, |ui| {
             ui.label("«Закрыть» сворачивает в трей (выйти — через значок в трее)");
         }, |ui| {
-            if t::switch(ui, &mut to_tray).changed() {
+            if kit::switch(ui, &mut to_tray).changed() {
                 self.settings.close_to_tray = to_tray;
                 self.settings.save();
             }
@@ -2084,7 +2085,7 @@ impl App {
                         ui.label("Режим рации — микрофон включён, пока держите клавишу");
                     }, |ui| {
                         let mut on = self.settings.ptt_enabled;
-                        if t::switch(ui, &mut on).changed() {
+                        if kit::switch(ui, &mut on).changed() {
                             self.settings.ptt_enabled = on;
                             self.settings.save();
                             self.ptt.set_enabled(on);
@@ -2097,7 +2098,7 @@ impl App {
                             }
                             ui.label(RichText::new("нажмите клавишу…").color(t::p().accent).size(13.0));
                         } else {
-                            let r = t::keycap(ui, &ptt::key_name(self.settings.ptt_key)).interact(Sense::click());
+                            let r = kit::keycap(ui, &ptt::key_name(self.settings.ptt_key)).interact(Sense::click());
                             if r.on_hover_text("Нажмите, чтобы назначить другую клавишу (можно кнопку мыши)").clicked() {
                                 self.ptt.begin_capture();
                             }
@@ -2129,7 +2130,7 @@ impl App {
                         toggle_row(ui, w, |ui| {
                             ui.label(text);
                         }, |ui| {
-                            if t::switch(ui, val).changed() {
+                            if kit::switch(ui, val).changed() {
                                 proc_changed = true;
                             }
                         });
@@ -2146,7 +2147,7 @@ impl App {
                     toggle_row(ui, w, |ui| {
                         ui.label("Звуки входа и выхода");
                     }, |ui| {
-                        if t::switch(ui, &mut sounds).changed() {
+                        if kit::switch(ui, &mut sounds).changed() {
                             self.settings.sounds = sounds;
                             self.settings.save();
                             self.voice.send(Cmd::SetSounds(sounds));
@@ -2202,7 +2203,7 @@ impl App {
                 });
                 ui.add_space(20.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if t::primary_button(ui, "Готово", 120.0, true).clicked() {
+                    if kit::button_wide(ui, kit::ButtonKind::Primary, "Готово", 120.0, true).clicked() {
                         close = true;
                     }
                 });

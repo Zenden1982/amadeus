@@ -16,6 +16,7 @@ use proto::{Attachment, Channel, Message, PublicUser, SendMessageRequest, Server
 
 use crate::api::{Api, ApiError, ApiResult};
 use crate::people::People;
+use crate::kit;
 use crate::theme as t;
 
 /// Сообщения одного автора подряд в пределах этого времени — одной группой (без повторной шапки).
@@ -934,7 +935,7 @@ impl Chat {
                 }
                 ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if t::icon_button(ui, ph::PLUS_CIRCLE, false, false, "Прикрепить картинку (или Ctrl+V, перетаскивание)").clicked() {
+                    if kit::icon_button(ui, ph::PLUS_CIRCLE, kit::IconState::Normal, "Прикрепить картинку (или Ctrl+V, перетаскивание)").clicked() {
                         pick = true;
                     }
                     let can_send = !d.text.trim().is_empty() || !d.images.is_empty();
@@ -958,7 +959,7 @@ impl Chat {
                         send = true;
                     }
                     ui.add_enabled_ui(can_send, |ui| {
-                        if t::icon_button(ui, ph::PAPER_PLANE_RIGHT, false, can_send, "Отправить (Enter)").clicked() {
+                        if kit::icon_button(ui, ph::PAPER_PLANE_RIGHT, if can_send { kit::IconState::Active } else { kit::IconState::Normal }, "Отправить (Enter)").clicked() {
                             send = true;
                         }
                     });

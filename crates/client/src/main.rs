@@ -8,6 +8,7 @@ mod config;
 mod denoise;
 mod desktop;
 mod frame;
+mod kit;
 mod metrics;
 mod mictest;
 mod people;

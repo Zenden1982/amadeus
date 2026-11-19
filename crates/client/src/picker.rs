@@ -12,6 +12,7 @@ use eframe::egui::{
 use egui_phosphor::regular as ph;
 
 use crate::stream::Preset;
+use crate::kit;
 use crate::theme as t;
 
 const W: f32 = 780.0;
@@ -123,10 +124,10 @@ impl Picker {
                     ui.label(RichText::new(if self.switching { "Сменить источник" } else { "Трансляция экрана" }).font(t::xbold(20.0)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
-                        if t::icon_button(ui, ph::X, false, false, "Закрыть").clicked() {
+                        if kit::icon_button(ui, ph::X, kit::IconState::Normal, "Закрыть").clicked() {
                             action = Action::Cancel;
                         }
-                        if t::icon_button(ui, ph::ARROWS_CLOCKWISE, false, false, "Обновить список").clicked() && self.rx.is_none() {
+                        if kit::icon_button(ui, ph::ARROWS_CLOCKWISE, kit::IconState::Normal, "Обновить список").clicked() && self.rx.is_none() {
                             self.reload(ctx);
                         }
                     });
@@ -300,7 +301,7 @@ impl Picker {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if self.switching { "Переключить" } else { "Начать трансляцию" };
                 let chosen = self.selected.and_then(|id| self.sources.as_ref()?.iter().find(|s| s.id == id));
-                if t::primary_button(ui, label, 210.0, chosen.is_some()).clicked()
+                if kit::button_wide(ui, kit::ButtonKind::Primary, label, 210.0, chosen.is_some()).clicked()
                     && let Some(s) = chosen {
                         out = Some(Action::Start { source: s.id, title: s.title.clone(), width: s.width, height: s.height, preset: self.preset, audio: self.audio });
                     }

@@ -1,8 +1,8 @@
 //! «Лаборатория ночью»: палитра, шрифты и рисованные элементы из design/mockup-phase3.html.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Response, Sense,
-    Shape, Stroke, StrokeKind, TextStyle, Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Sense,
+    Shape, Stroke, TextStyle, Ui, Vec2, pos2, vec2,
 };
 
 /// Смысловые цвета темы. Экраны берут цвета только отсюда: `t::p().text` и т. п.
@@ -360,129 +360,6 @@ pub fn wordmark(ui: &mut Ui, logo_size: f32, text_size: f32) {
         ui.add_space(2.0);
         ui.label(egui::RichText::new("Amadeus").font(xbold(text_size)).color(self::p().text));
     });
-}
-
-/// Переключатель как в макете (янтарь = вкл).
-pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(40.0, 22.0), Sense::click());
-    if resp.clicked() {
-        *on = !*on;
-        resp.mark_changed();
-    }
-    let t = ui.ctx().animate_bool(resp.id, *on);
-    let p = ui.painter();
-    let bg = Color32::from_rgb(0x3A, 0x2F, 0x25).lerp_to_gamma(self::p().accent, t);
-    p.rect_filled(rect, CornerRadius::same(11), bg);
-    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    p.circle_filled(pos2(x, rect.center().y), 8.0, self::p().text_muted.lerp_to_gamma(self::p().on_accent, t));
-    resp
-}
-
-/// Ползунок громкости: янтарная дорожка + светящаяся «нить».
-pub fn slider(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, width: f32) -> Response {
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 20.0), Sense::click_and_drag());
-    let (lo, hi) = (*range.start(), *range.end());
-    if let Some(pos) = resp.interact_pointer_pos() {
-        let t = ((pos.x - rect.left() - 8.0) / (rect.width() - 16.0)).clamp(0.0, 1.0);
-        let nv = lo + t * (hi - lo);
-        if (nv - *value).abs() > f32::EPSILON {
-            *value = nv;
-            resp.mark_changed();
-        }
-    }
-    let t = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
-    let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 16.0, 6.0));
-    let p = ui.painter();
-    p.rect_filled(track, CornerRadius::same(3), self::p().bg);
-    let x = track.left() + track.width() * t;
-    p.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::same(3), self::p().accent);
-    p.circle_filled(pos2(x, rect.center().y), 13.0, accent_a(40));
-    p.circle_filled(pos2(x, rect.center().y), 8.0, self::p().accent_hover);
-    resp
-}
-
-/// Клавиша в рамке (как `.key` в макете).
-pub fn keycap(ui: &mut Ui, text: &str) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_string(), bold(12.5), self::p().text);
-    let size = galley.size() + vec2(16.0, 6.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect.translate(vec2(0.0, 2.0)), CornerRadius::same(6), self::p().border_strong);
-    p.rect(rect, CornerRadius::same(6), self::p().bg, Stroke::new(1.0, self::p().border_strong), StrokeKind::Inside);
-    p.galley(rect.center() - galley.size() / 2.0, galley, self::p().text);
-    resp
-}
-
-/// Квадратная иконка-кнопка (34×34). `hot` — красная (выключено).
-pub fn icon_button(ui: &mut Ui, icon: &str, hot: bool, filled: bool, tooltip: &str) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
-    let p = ui.painter();
-    if hot {
-        p.rect_filled(rect, CornerRadius::same(8), Color32::from_rgba_unmultiplied(229, 83, 75, 30));
-    } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(8), self::p().surface_2);
-    }
-    let color = if hot { self::p().danger } else if resp.hovered() { self::p().text } else { self::p().text_muted };
-    let f = if filled { icon_fill(20.0) } else { font(20.0) };
-    p.text(rect.center(), Align2::CENTER_CENTER, icon, f, color);
-    resp.on_hover_text(tooltip)
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum DockStyle {
-    Normal,
-    Live,
-    Off,
-    Leave,
-}
-
-/// Большая кнопка дока: иконка + подпись.
-pub fn dock_button(ui: &mut Ui, icon: &str, label: &str, style: DockStyle) -> Response {
-    let font_l = semibold(14.0);
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font_l, self::p().text);
-    let w = 18.0 + 22.0 + 10.0 + galley.size().x + 18.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
-    let p = ui.painter();
-    let (fill, stroke) = match style {
-        DockStyle::Leave => (if resp.hovered() { Color32::from_rgb(0xF0, 0x62, 0x5A) } else { self::p().danger }, self::p().danger),
-        _ => (if resp.hovered() { Color32::from_rgb(0x33, 0x29, 0x21) } else { self::p().surface_2 }, Color32::from_rgb(0x3A, 0x2F, 0x25)),
-    };
-    p.rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-    let icon_pos = pos2(rect.left() + 18.0 + 11.0, rect.center().y);
-    let (icon_color, icon_font) = match style {
-        DockStyle::Live => (self::p().accent, icon_fill(20.0)),
-        DockStyle::Off => (self::p().danger, icon_fill(20.0)),
-        DockStyle::Leave => (Color32::WHITE, font(20.0)),
-        DockStyle::Normal => (self::p().text, font(20.0)),
-    };
-    if style == DockStyle::Live {
-        p.circle_filled(icon_pos, 12.0, accent_a(35));
-    }
-    p.text(icon_pos, Align2::CENTER_CENTER, icon, icon_font, icon_color);
-    let text_color = if style == DockStyle::Leave { Color32::WHITE } else { self::p().text };
-    p.galley(pos2(rect.left() + 18.0 + 22.0 + 10.0, rect.center().y - galley.size().y / 2.0), galley, text_color);
-    resp
-}
-
-/// Главная янтарная кнопка (на всю ширину).
-pub fn primary_button(ui: &mut Ui, text: &str, width: f32, enabled: bool) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 46.0), if enabled { Sense::click() } else { Sense::hover() });
-    let p = ui.painter();
-    let fill = if !enabled {
-        self::p().accent.gamma_multiply(0.45)
-    } else if resp.hovered() {
-        Color32::from_rgb(0xFF, 0xAA, 0x55)
-    } else {
-        self::p().accent
-    };
-    if enabled {
-        for i in 0..3 {
-            p.rect_filled(rect.expand(2.0 + i as f32 * 3.0), CornerRadius::same(10 + 3 * i as u8), accent_a(10));
-        }
-    }
-    p.rect_filled(rect, CornerRadius::same(8), fill);
-    p.text(rect.center(), Align2::CENTER_CENTER, text, bold(15.0), self::p().on_accent);
-    resp
 }
 
 /// Русское склонение: 1 участник, 2 участника, 5 участников.
