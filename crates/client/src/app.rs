@@ -154,6 +154,7 @@ impl App {
         t::install(&cc.egui_ctx);
         crate::frame::style_native_window(cc);
         let ctx = cc.egui_ctx.clone();
+        start_watchdog(ctx.clone());
         let settings = Settings::load();
         let api = Api::new(&settings.server_url, settings.session_token.clone());
         let repaint: Arc<dyn Fn() + Send + Sync> = {
@@ -2131,13 +2132,15 @@ fn now_ms() -> u64 {
 }
 
 /// Сторожок: если UI-поток не отрисовывал кадр больше 3 с при видимом окне — пишет в лог (раз в 5 с).
-pub fn start_watchdog() {
+/// Сам тоже просит кадр раз в 0,5 с: простой окна (egui не рисует без событий) не должен выглядеть как зависание.
+pub fn start_watchdog(ctx: egui::Context) {
     use std::sync::atomic::Ordering::Relaxed;
     now_ms();
-    let _ = std::thread::Builder::new().name("amadeus-watchdog".into()).spawn(|| {
+    let _ = std::thread::Builder::new().name("amadeus-watchdog".into()).spawn(move || {
         let mut warned = 0u64;
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(500));
+            ctx.request_repaint();
             let beat = UI_BEAT.load(Relaxed);
             let stalled = now_ms().saturating_sub(beat);
             if UI_VISIBLE.load(Relaxed) && beat > 0 && stalled > 3000 {
@@ -2208,6 +2211,20 @@ impl eframe::App for App {
         if !self.fullscreen {
             crate::frame::resize_edges(ui.ctx());
         }
+    }
+
+    /// Настоящий выход: выйти из канала (до 0,8 с) и завершить процесс сразу — иначе остановка tokio ждёт зависшие
+    /// вызовы звукового движка, и программа «не закрывается».
+    fn on_exit(&mut self) {
+        log::info!("завершение: выход из канала и остановка");
+        self.voice.send(Cmd::Leave);
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(800) && !matches!(self.voice.snapshot().conn, Conn::Idle) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.tray = None;
+        log::logger().flush();
+        std::process::exit(0);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

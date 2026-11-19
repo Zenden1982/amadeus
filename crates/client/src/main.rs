@@ -40,7 +40,6 @@ fn main() -> eframe::Result {
         }
     }
     logger.init();
-    app::start_watchdog();
     let args = desktop::Args::parse(std::env::args().skip(1));
     // После обновления: дождаться, пока старая копия отпустит «единственный экземпляр».
     if let Some(pid) = args.after_update {

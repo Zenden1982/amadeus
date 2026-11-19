@@ -396,16 +396,33 @@ impl Engine {
         }
     }
 
+    /// Список устройств — в отдельном потоке: вызовы ADM ждут поток WebRTC и могут зависнуть, пока драйвер занят
+    /// (так вставал весь движок, а с ним и выход из программы).
     fn refresh_devices(&self) {
-        let Some(audio) = &self.audio else { return };
-        let inputs: Vec<Device> =
-            audio.recording_devices().map(|d| Device { id: d.id.as_str().to_string(), name: d.name }).collect();
-        let outputs: Vec<Device> =
-            audio.playout_devices().map(|d| Device { id: d.id.as_str().to_string(), name: d.name }).collect();
-        self.set(|s| {
-            s.inputs = inputs;
-            s.outputs = outputs;
+        static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let Some(audio) = self.audio.clone() else { return };
+        if BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return; // предыдущее перечисление ещё не вернулось
+        }
+        let (state, repaint) = (self.state.clone(), self.repaint.clone());
+        let spawned = std::thread::Builder::new().name("amadeus-devices".into()).spawn(move || {
+            let t0 = Instant::now();
+            let inputs: Vec<Device> =
+                audio.recording_devices().map(|d| Device { id: d.id.as_str().to_string(), name: d.name }).collect();
+            let outputs: Vec<Device> =
+                audio.playout_devices().map(|d| Device { id: d.id.as_str().to_string(), name: d.name }).collect();
+            log::info!("устройства: {} входов, {} выходов за {} мс", inputs.len(), outputs.len(), t0.elapsed().as_millis());
+            {
+                let mut s = state.lock().unwrap();
+                s.inputs = inputs;
+                s.outputs = outputs;
+            }
+            repaint();
+            BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
         });
+        if spawned.is_err() {
+            BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     fn apply_processing(&self) {
