@@ -149,6 +149,11 @@ impl People {
         None
     }
 
+    /// Текстура аватара человека, если уже загружена.
+    pub fn texture_of(&self, u: &PublicUser) -> Option<egui::TextureId> {
+        u.avatar.as_deref().and_then(|k| self.texture(k)).map(|t| t.id())
+    }
+
     /// Аватар: картинка в круге, а пока её нет (или нет вовсе) — буква на цветном круге.
     pub fn paint(&self, painter: &egui::Painter, center: Pos2, r: f32, u: &PublicUser, glow: f32, dim: bool) {
         let tex = u.avatar.as_deref().and_then(|k| self.texture(k));

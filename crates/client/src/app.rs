@@ -1139,25 +1139,40 @@ impl App {
         match (&vs.conn, &vs.channel) {
             (Conn::Failed(msg), _) => {
                 let msg = msg.clone();
-                let area = Rect::from_center_size(r.center(), vec2(460.0, 140.0));
+                let area = Rect::from_center_size(r.center(), vec2(520.0, 140.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                    kit::notice(ui, kit::Notice::Error, &msg, false);
+                    ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(format!("{}  {msg}", ph::WARNING_CIRCLE)).color(t::p().danger_text));
-                        ui.add_space(8.0);
                         if let Some(ch) = vs.channel.clone()
-                            && ui.button("Повторить").clicked() {
-                                self.voice.send(Cmd::Join(ch));
-                            }
+                            && kit::button(ui, kit::ButtonKind::Primary, "Повторить", Some(egui_phosphor::fill::ARROW_CLOCKWISE)).clicked()
+                        {
+                            self.voice.send(Cmd::Join(ch));
+                        }
                     });
                 });
             }
             (_, None) => {
-                let p = ui.painter();
-                t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 50.0), vec2(110.0, 110.0)), true);
-                p.text(r.center() + vec2(0.0, 30.0), Align2::CENTER_TOP, "Выберите голосовой канал слева", t::semibold(16.0), t::p().text_muted);
+                let area = Rect::from_center_size(r.center(), vec2(420.0, 260.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                    kit::empty_state(ui, kit::MascotPose::Sitting, "Выберите голосовой канал", "Список каналов — слева", None);
+                });
             }
             (Conn::Connecting, Some(_)) if vs.peers.is_empty() => {
-                ui.painter().text(r.center(), Align2::CENTER_CENTER, "Подключаемся…", t::semibold(16.0), t::p().text_muted);
+                let area = Rect::from_center_size(r.center(), vec2(240.0, 80.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                    ui.vertical_centered(|ui| {
+                        kit::spinner(ui, 28.0);
+                        ui.label(RichText::new("Подключаемся…").font(t::semibold(15.0)).color(t::p().text_muted));
+                    });
+                });
+            }
+            // В канале только я и никто не стримит — «Тут тихо».
+            (Conn::Connected, Some(_)) if vs.peers.len() <= 1 && !vs.peers.iter().any(|p| p.streaming) => {
+                let area = Rect::from_center_size(r.center(), vec2(420.0, 300.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                    kit::empty_state(ui, kit::MascotPose::Sleeping, "Тут тихо", "Позови своих — они появятся здесь", None);
+                });
             }
             _ => self.ui_room(ui, vs),
         }
@@ -1223,18 +1238,18 @@ impl App {
         let resp = ui.interact(rect, Id::new(("stream", &p.identity)), Sense::click());
         let hovered = ui.rect_contains_pointer(rect);
         let painter = ui.painter().clone();
-        let radius = CornerRadius::same(12);
-        painter.rect_filled(rect, radius, t::p().video_bg);
+        let radius = CornerRadius::same(kit::R_CARD);
+        kit::stream_tile_frame(&painter, rect, false);
         let small = rect.height() < 200.0;
 
         if p.is_local {
             // Своё видео не декодируем (лишняя нагрузка) — только подпись.
             let title = vs.stream.as_ref().map(|s| s.title.clone()).unwrap_or_default();
             let c = rect.center();
-            painter.text(c - vec2(0.0, if small { 14.0 } else { 26.0 }), Align2::CENTER_CENTER, ph::MONITOR_ARROW_UP, t::font(if small { 26.0 } else { 40.0 }), t::p().accent);
-            painter.text(c + vec2(0.0, if small { 12.0 } else { 14.0 }), Align2::CENTER_CENTER, "Вы транслируете", t::bold(if small { 13.0 } else { 15.0 }), t::p().text);
+            painter.text(c - vec2(0.0, if small { 14.0 } else { 26.0 }), Align2::CENTER_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(if small { 26.0 } else { 40.0 }), t::p().accent);
+            painter.text(c + vec2(0.0, if small { 12.0 } else { 14.0 }), Align2::CENTER_CENTER, "Вы транслируете", t::bold(if small { 13.0 } else { 15.0 }), ON_VIDEO);
             if !small {
-                painter.text(c + vec2(0.0, 36.0), Align2::CENTER_CENTER, ellipsize(&title, 40), t::font(13.0), t::p().text_muted);
+                painter.text(c + vec2(0.0, 36.0), Align2::CENTER_CENTER, ellipsize(&title, 40), t::font(13.0), ON_VIDEO_MUTED);
             }
         } else if watching {
             match self.video.frame(&p.identity) {
@@ -1243,22 +1258,21 @@ impl App {
                     egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).corner_radius(radius).paint_at(ui, vr);
                     self.mark_view(&p.identity, vr, ui.ctx().pixels_per_point());
                     if f.stale {
-                        chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Нет новых кадров — стример свернул окно или пропала связь", ph::HOURGLASS), t::p().text_muted);
+                        chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Нет новых кадров — стример свернул окно или пропала связь", ph::HOURGLASS), ON_VIDEO_MUTED);
                     }
                     if big && hovered && f.fps > 0.0 {
-                        chip(&painter, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, &format!("{}×{} · {:.0} к/с", f.size[0], f.size[1], f.fps), t::p().text_muted);
+                        chip(&painter, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, &format!("{}×{} · {:.0} к/с", f.size[0], f.size[1], f.fps), ON_VIDEO_MUTED);
                     }
                 }
                 None => {
                     self.mark_view(&p.identity, rect, ui.ctx().pixels_per_point());
                     egui::Spinner::new().size(30.0).color(t::p().accent).paint_at(ui, Rect::from_center_size(rect.center() - vec2(0.0, 12.0), vec2(30.0, 30.0)));
-                    painter.text(rect.center() + vec2(0.0, 22.0), Align2::CENTER_CENTER, "Подключаемся к трансляции…", t::font(13.0), t::p().text_muted);
+                    painter.text(rect.center() + vec2(0.0, 22.0), Align2::CENTER_CENTER, "Подключаемся к трансляции…", t::font(13.0), ON_VIDEO_MUTED);
                     ui.ctx().request_repaint_after(Duration::from_millis(50));
                 }
             }
         } else {
             // Не смотрим: аватар стримера и «Смотреть» (канал не тратится, пока не нажали).
-            t::radial_glow(&painter, rect.center(), rect.width().min(rect.height()) * 0.6, t::accent_a(if hovered { 22 } else { 12 }));
             // Совсем маленькая плитка (лента, много трансляций) — только кнопка, без аватара.
             let tiny = rect.height() < 140.0;
             let ar = (rect.height() * 0.16).clamp(16.0, 34.0);
@@ -1267,7 +1281,7 @@ impl App {
                 self.people.paint(&painter, ac, ar, &peer_user(&self.people, p), 0.0, false);
             }
             if !small {
-                painter.text(ac + vec2(0.0, ar + 18.0), Align2::CENTER_CENTER, format!("{} транслирует экран", peer_name(&self.people, p)), t::semibold(14.0), t::p().text);
+                painter.text(ac + vec2(0.0, ar + 18.0), Align2::CENTER_CENTER, format!("{} транслирует экран", peer_name(&self.people, p)), t::semibold(14.0), ON_VIDEO);
             }
             let bw = if small { 116.0 } else { 150.0 };
             let by = if tiny { rect.center().y - 4.0 } else { ac.y + ar + if small { 22.0 } else { 52.0 } };
@@ -1276,16 +1290,11 @@ impl App {
             painter.text(br.center(), Align2::CENTER_CENTER, format!("{}  Смотреть", ph::PLAY), t::bold(if small { 13.0 } else { 14.5 }), t::p().on_accent);
         }
 
-        let stroke = if big || (watching && hovered) {
-            Stroke::new(1.0, t::accent_a(120))
-        } else if hovered {
-            Stroke::new(1.0, t::p().border_strong)
-        } else {
-            Stroke::new(1.0, t::p().border)
-        };
-        painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
-        live_badge(&painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
-        chip(&painter, rect.left_bottom() + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, peer_name(&self.people, p)), t::p().text);
+        if big || hovered {
+            painter.rect_stroke(rect, radius, Stroke::new(2.0, t::p().accent.gamma_multiply(if big { 0.6 } else { 1.0 })), StrokeKind::Inside);
+        }
+        kit::live_badge(&painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
+        chip(&painter, rect.left_bottom() + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, peer_name(&self.people, p)), ON_VIDEO);
 
         if p.is_local {
             return;
@@ -1450,7 +1459,7 @@ impl App {
                     egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).paint_at(ui, vr);
                     self.mark_view(&id, vr, ui.ctx().pixels_per_point());
                     if !idle {
-                        chip(ui.painter(), r.left_top() + vec2(20.0, 20.0), Align2::LEFT_TOP, &format!("{}  {} · {}×{} · {:.0} к/с", ph::MONITOR, p.name, f.size[0], f.size[1], f.fps), t::p().text);
+                        chip(ui.painter(), r.left_top() + vec2(20.0, 20.0), Align2::LEFT_TOP, &format!("{}  {} · {}×{} · {:.0} к/с", ph::MONITOR, p.name, f.size[0], f.size[1], f.fps), ON_VIDEO);
                     }
                 }
                 None => {
@@ -1468,7 +1477,7 @@ impl App {
                 return;
             }
             ui.ctx().request_repaint_after(Duration::from_millis(250));
-            chip(ui.painter(), pos2(r.center().x, r.top() + 20.0), Align2::CENTER_TOP, "Esc или двойной клик — выйти из полного экрана", t::p().text_muted);
+            chip(ui.painter(), pos2(r.center().x, r.top() + 20.0), Align2::CENTER_TOP, "Esc или двойной клик — выйти из полного экрана", ON_VIDEO_MUTED);
             let mut c = pos2(r.right() - 36.0, r.bottom() - 36.0);
             if overlay_button(ui, c, ph::X, "Перестать смотреть", Id::new("fs-stop")).clicked() {
                 self.unwatch(ui.ctx(), &id);
@@ -1518,7 +1527,7 @@ impl App {
                     .corner_radius(CornerRadius::same(255))
                     .inner_margin(Margin::symmetric(16, 8))
                     .show(ui, |ui| {
-                        ui.label(RichText::new(format!("{}  {text}", ph::ARROWS_CLOCKWISE)).color(t::p().accent_hover).size(13.5));
+                        ui.label(RichText::new(format!("{}  {text}", ph::ARROWS_CLOCKWISE)).color(t::p().text).size(13.5));
                     });
             });
         let _ = screen;
@@ -1628,10 +1637,10 @@ impl App {
         let mut s_changed = false;
         let area = egui::Area::new(Id::new("vol-popup")).order(egui::Order::Foreground).fixed_pos(pos + vec2(8.0, 8.0)).show(ui.ctx(), |ui| {
             Frame::new()
-                .fill(t::p().surface_2)
-                .stroke(Stroke::new(1.0, t::p().border_strong))
-                .corner_radius(CornerRadius::same(10))
-                .inner_margin(Margin::symmetric(16, 14))
+                .fill(t::p().surface)
+                .stroke(Stroke::new(1.0, t::p().border))
+                .corner_radius(CornerRadius::same(kit::R_CARD))
+                .inner_margin(Margin::symmetric(14, 12))
                 .shadow(ui.visuals().popup_shadow)
                 .show(ui, |ui| {
                     ui.set_width(250.0);
@@ -1646,18 +1655,18 @@ impl App {
                         changed = true;
                     }
                     ui.add_space(4.0);
-                    let (icon, text) = if muted { (ph::SPEAKER_HIGH, "Включить для себя") } else { (ph::SPEAKER_SLASH, "Заглушить для себя") };
-                    let r = ui.add(egui::Label::new(RichText::new(format!("{icon}  {text}")).size(13.5)).sense(Sense::click()));
-                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    let (icon, text) = if muted {
+                        (egui_phosphor::fill::SPEAKER_HIGH, "Включить для себя")
+                    } else {
+                        (egui_phosphor::fill::SPEAKER_SLASH, "Заглушить для себя")
+                    };
+                    if kit::menu_item(ui, icon, text, !muted).clicked() {
                         muted = !muted;
                         changed = true;
                     }
-                    if (vol - 1.0).abs() > 0.01 {
-                        let r = ui.add(egui::Label::new(RichText::new(format!("{}  Сбросить (100%)", ph::ARROW_COUNTER_CLOCKWISE)).size(13.5).color(t::p().text_muted)).sense(Sense::click()));
-                        if r.clicked() {
-                            vol = 1.0;
-                            changed = true;
-                        }
+                    if (vol - 1.0).abs() > 0.01 && kit::menu_item(ui, egui_phosphor::fill::ARROW_COUNTER_CLOCKWISE, "Сбросить (100%)", false).clicked() {
+                        vol = 1.0;
+                        changed = true;
                     }
                     // Звук трансляции — отдельно от голоса (как в Discord).
                     if streaming {
@@ -2452,12 +2461,16 @@ fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() > max { s.chars().take(max - 1).chain(['…']).collect() } else { s.to_string() }
 }
 
+/// Текст поверх видео (видео тёмное в обеих темах).
+const ON_VIDEO: Color32 = Color32::from_rgb(0xF2, 0xF4, 0xF8);
+const ON_VIDEO_MUTED: Color32 = Color32::from_rgb(0xB8, 0xBE, 0xCA);
+
 /// Полупрозрачная подпись поверх видео.
 fn chip(painter: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, color: Color32) {
     let galley = painter.layout_no_wrap(text.to_string(), t::semibold(13.0), color);
     let size = galley.size() + vec2(18.0, 10.0);
     let r = anchor.anchor_size(pos, size);
-    painter.rect_filled(r, CornerRadius::same(7), t::overlay_dark(190));
+    painter.rect_filled(r, CornerRadius::same(255), t::overlay_dark(190));
     painter.galley(r.min + vec2(9.0, 5.0), galley, color);
 }
 
@@ -2467,9 +2480,8 @@ fn overlay_button(ui: &Ui, center: Pos2, icon: &str, tip: &str, id: Id) -> egui:
     let resp = ui.interact(rect, id, Sense::click());
     let hot = resp.hovered();
     let p = ui.painter();
-    p.circle_filled(center, 18.0, t::overlay_dark(if hot { 235 } else { 170 }));
-    p.circle_stroke(center, 18.0, Stroke::new(1.0, if hot { t::accent_a(160) } else { t::p().border_strong }));
-    p.text(center, Align2::CENTER_CENTER, icon, t::font(18.0), if hot { t::p().accent_hover } else { t::p().text });
+    p.circle_filled(center, 18.0, if hot { t::p().accent } else { t::overlay_dark(190) });
+    p.text(center, Align2::CENTER_CENTER, icon, t::font(18.0), ON_VIDEO);
     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -2532,52 +2544,15 @@ fn speak_glow(ui: &Ui, p: &Peer) -> f32 {
 
 fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32, people: &People) {
     let u = peer_user(people, p);
-    let painter = ui.painter();
-    let talk = glow > 0.05;
-    painter.rect_filled(rect, CornerRadius::same(12), t::p().surface);
-    if talk {
-        let c = rect.center() - vec2(0.0, rect.height() * 0.05);
-        t::radial_glow(painter, c, rect.width().min(rect.height()) * 0.7, t::accent_a((32.0 * glow) as u8));
-    }
-    let stroke = if talk { Stroke::new(1.0, t::accent_a((140.0 * glow) as u8 + 20)) } else { Stroke::new(1.0, t::p().border) };
-    painter.rect_stroke(rect, CornerRadius::same(12), stroke, StrokeKind::Inside);
-    let r = (rect.height().min(rect.width()) * 0.22).clamp(24.0, 46.0);
-    let ac = rect.center() - vec2(0.0, r * 0.35);
-    people.paint(painter, ac, r, &u, glow, p.mic_muted && !p.is_local);
-    let name_pos = pos2(rect.center().x, ac.y + r + 18.0);
-    let galley = painter.layout_no_wrap(u.shown_name().to_string(), t::bold(15.0), t::p().text);
-    let icon_w = if p.mic_muted { 24.0 } else { 0.0 };
-    let start = name_pos.x - (galley.size().x + icon_w) / 2.0;
-    painter.galley(pos2(start, name_pos.y - galley.size().y / 2.0), galley.clone(), t::p().text);
-    if p.mic_muted {
-        painter.text(
-            pos2(start + galley.size().x + 8.0, name_pos.y),
-            Align2::LEFT_CENTER,
-            egui_phosphor::fill::MICROPHONE_SLASH,
-            t::icon_fill(16.0),
-            t::p().danger,
-        );
-    }
-    if p.streaming {
-        live_badge(painter, pos2(rect.right() - 12.0, rect.top() + 12.0));
-    }
-    if p.is_local {
-        let tag = painter.layout_no_wrap("это вы".into(), t::font(12.0), t::p().text_muted);
-        let tr = Rect::from_min_size(rect.min + vec2(12.0, 12.0), tag.size() + vec2(16.0, 6.0));
-        painter.rect_filled(tr, CornerRadius::same(6), t::p().bg);
-        painter.galley(tr.min + vec2(8.0, 3.0), tag, t::p().text_muted);
-    }
-}
-
-/// Плашка «В ЭФИРЕ» (правый верхний угол = `right_top`).
-fn live_badge(painter: &egui::Painter, right_top: Pos2) {
-    let galley = painter.layout_no_wrap("В ЭФИРЕ".into(), t::bold(11.0), t::p().on_accent);
-    let size = galley.size() + vec2(24.0, 8.0);
-    let r = Rect::from_min_size(pos2(right_top.x - size.x, right_top.y), size);
-    painter.rect_filled(r.expand(3.0), CornerRadius::same(9), t::accent_a(30));
-    painter.rect_filled(r, CornerRadius::same(6), t::p().accent);
-    painter.circle_filled(pos2(r.left() + 9.0, r.center().y), 3.0, t::p().on_accent);
-    painter.galley(pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, t::p().on_accent);
+    let badge = if p.mic_muted { kit::PeerBadge::MicOff } else { kit::PeerBadge::None };
+    kit::peer_tile(ui, rect, &kit::PeerTile {
+        who: kit::AvatarInput { name: &u.name, texture: people.texture_of(&u) },
+        name: u.shown_name(),
+        speaking: glow,
+        badge,
+        is_local: p.is_local,
+        streaming: p.streaming,
+    });
 }
 
 /// Статус своей трансляции в шапке: источник, качество, факт к/с и битрейт, энкодер.
