@@ -8,6 +8,9 @@ ACCENT = (0x5B, 0x8C, 0xFF)
 
 LINE = [(2, 42), (10, 42), (14, 18), (24, 32), (32, 22), (40, 32), (50, 18), (54, 42), (62, 42)]
 EYES = [(26, 44), (38, 44)]
+# мелкие (трей, панель задач): та же «M с глазами», но выше и уже — почти квадрат, без «хвостов» линии
+LINE_SMALL = [(12, 46), (16, 12), (26, 30), (32, 20), (38, 30), (48, 12), (52, 46)]
+EYES_SMALL = [(26, 52), (38, 52)]
 
 def render(size):
     S = 8  # суперсэмплинг
@@ -18,18 +21,29 @@ def render(size):
     img = Image.new('RGBA', (W, W), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     # мелкие: обрезаем «хвосты» линии (слишком тонкие) и сдвигаем знак вверх-по центру
-    line = LINE[1:-1] if small else LINE
+    # значок везде компактный (почти квадрат): трей, панель задач, «Пуск»; длинная форма — логотип внутри программы
+    line = LINE_SMALL
+    eyes = EYES_SMALL
     dy = -4 if small else -4
     pts = [(off + x * u, (y + dy) * u + off + (6 * u if small else 0)) for x, y in line]
-    core = (8.5 if small else 5.5) * u
+    core = (8.5 if small else 7.0) * u
     d.line(pts, fill=ACCENT + (255,), width=int(core), joint='curve')
     for p in pts:  # круглые концы и стыки
         r = core / 2
         d.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=ACCENT + (255,))
-    er = (4.0 if small else 2.8) * u
-    for x, y in EYES:
+    er = (4.0 if small else 3.6) * u
+    for x, y in eyes:
         cx, cy = off + x * u, (y + dy) * u + off + (6 * u if small else 0) + (2 * u if small else 0)
         d.ellipse([cx - er, cy - er, cx + er, cy + er], fill=ACCENT + (255,))
+    # подогнать знак почти вплотную к краям (в трее значок мелкий — пустые поля его «съедают»)
+    box = img.getbbox()
+    if box:
+        img = img.crop(box)
+        side = max(img.size)
+        margin = int(side * (0.03 if small else 0.06))
+        sq = Image.new('RGBA', (side + 2 * margin, side + 2 * margin), (0, 0, 0, 0))
+        sq.paste(img, (margin + (side - img.size[0]) // 2, margin + (side - img.size[1]) // 2), img)
+        img = sq
     return img.resize((size, size), Image.LANCZOS)
 
 sizes = [16, 20, 24, 32, 48, 64, 128, 256]
