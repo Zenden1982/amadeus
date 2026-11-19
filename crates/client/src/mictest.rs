@@ -40,9 +40,30 @@ struct SendApm(AudioProcessingModule);
 // SAFETY: APM используется только из одного потока (колбэк захвата), между вызовами не разделяется.
 unsafe impl Send for SendApm {}
 
-pub struct MicTest {
+/// Открытые потоки WASAPI. Живут только в рабочем потоке (cpal-потоки не передаются между потоками).
+struct Streams {
     _input: cpal::Stream,
     _output: Option<cpal::Stream>,
+}
+
+/// Проверка микрофона. Потоки открываются и закрываются в отдельном потоке: на занятом/сломанном устройстве WASAPI
+/// это может занимать секунды, а UI-поток ждать не должен. Уничтожение значения останавливает проверку.
+pub struct MicTest {
+    _stop: std::sync::mpsc::Sender<()>,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl MicTest {
+    /// Потоки открыты и работают.
+    pub fn running(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
+    /// Забирает ошибку запуска (один раз).
+    pub fn take_error(&self) -> Option<String> {
+        self.error.lock().unwrap().take()
+    }
 }
 
 /// Устройство по имени (имена WASAPI совпадают с именами ADM); None или не найдено — по умолчанию.
@@ -51,7 +72,7 @@ fn find(devices: impl Iterator<Item = cpal::Device>, name: Option<&str>) -> Opti
     devices.into_iter().find(|d| d.description().is_ok_and(|desc| desc.name() == name || name.contains(desc.name()) || desc.name().contains(name)))
 }
 
-/// Запускает захват. `level` — уровень 0..1 (биты f32). `playback` — выводить себя в наушники.
+/// Запускает проверку в фоне, сразу возвращается. `level` — уровень 0..1 (биты f32). `playback` — выводить себя в наушники.
 pub fn start(
     input_name: Option<&str>,
     output_name: Option<&str>,
@@ -59,7 +80,41 @@ pub fn start(
     agc: bool,
     playback: bool,
     level: Arc<AtomicU32>,
-) -> Result<MicTest, String> {
+) -> MicTest {
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let error = Arc::new(Mutex::new(None));
+    let (input_name, output_name) = (input_name.map(str::to_owned), output_name.map(str::to_owned));
+    let (ready2, error2) = (ready.clone(), error.clone());
+    let spawned = std::thread::Builder::new().name("amadeus-mictest".into()).spawn(move || {
+        let t0 = std::time::Instant::now();
+        match open(input_name.as_deref(), output_name.as_deref(), ns, agc, playback, level) {
+            Ok(streams) => {
+                log::info!("проверка микрофона: запущена за {} мс", t0.elapsed().as_millis());
+                ready2.store(true, Ordering::Relaxed);
+                let _ = stop_rx.recv(); // вернётся, когда MicTest уничтожен
+                ready2.store(false, Ordering::Relaxed);
+                let t1 = std::time::Instant::now();
+                drop(streams);
+                log::info!("проверка микрофона: остановлена за {} мс", t1.elapsed().as_millis());
+            }
+            Err(e) => *error2.lock().unwrap() = Some(e),
+        }
+    });
+    if let Err(e) = spawned {
+        *error.lock().unwrap() = Some(format!("поток не запущен: {e}"));
+    }
+    MicTest { _stop: stop_tx, ready, error }
+}
+
+fn open(
+    input_name: Option<&str>,
+    output_name: Option<&str>,
+    ns: bool,
+    agc: bool,
+    playback: bool,
+    level: Arc<AtomicU32>,
+) -> Result<Streams, String> {
     let host = cpal::default_host();
     let input = find(host.input_devices().map_err(|e| e.to_string())?, input_name)
         .or_else(|| host.default_input_device())
@@ -159,7 +214,7 @@ pub fn start(
     if let Some(s) = &out_stream {
         s.play().map_err(|e| format!("вывод: {e}"))?;
     }
-    Ok(MicTest { _input: input_stream, _output: out_stream })
+    Ok(Streams { _input: input_stream, _output: out_stream })
 }
 
 #[cfg(test)]

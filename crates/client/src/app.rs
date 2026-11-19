@@ -1639,22 +1639,19 @@ impl App {
             self.settings.auto_gain,
             self.mic_playback,
         );
+        // Ошибка запуска приходит из фонового потока.
+        if let Some(e) = self.mic_test.as_ref().and_then(|t| t.take_error()) {
+            log::warn!("проверка микрофона: {e}");
+            self.mic_test_error = Some(e);
+            self.mic_playback = false; // ключ изменится — проверка перезапустится без «слышать себя»
+        }
         if self.mic_test_key.as_ref() == Some(&key) {
             return;
         }
         self.mic_test = None; // сначала закрыть старые потоки
         self.mic_level.store(0, Ordering::Relaxed);
-        match mictest::start(key.0.as_deref(), key.1.as_deref(), key.2, key.3, key.4, self.mic_level.clone()) {
-            Ok(t) => {
-                self.mic_test = Some(t);
-                self.mic_test_error = None;
-            }
-            Err(e) => {
-                log::warn!("проверка микрофона: {e}");
-                self.mic_test_error = Some(e);
-                self.mic_playback = false;
-            }
-        }
+        self.mic_test_error = None;
+        self.mic_test = Some(mictest::start(key.0.as_deref(), key.1.as_deref(), key.2, key.3, key.4, self.mic_level.clone()));
         self.mic_test_key = Some(key);
     }
 
@@ -1969,7 +1966,7 @@ impl App {
                         self.settings.save();
                         self.voice.send(Cmd::SetInputDevice(input));
                     }
-                    let level = if self.mic_test.is_some() {
+                    let level = if self.mic_test.as_ref().is_some_and(|t| t.running()) {
                         Some(f32::from_bits(self.mic_level.load(Ordering::Relaxed)))
                     } else {
                         vs.peers.iter().find(|p| p.is_local).map(|p| p.level)
