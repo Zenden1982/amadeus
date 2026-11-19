@@ -256,12 +256,12 @@ fn apply_visuals(ctx: &egui::Context, pal: &'static Palette) {
 /// Цвет аватара — стабильный по имени (палитра из макета).
 pub fn avatar_color(name: &str) -> Color32 {
     const P: [Color32; 6] = [
-        Color32::from_rgb(0xE9, 0xB4, 0x6A),
-        Color32::from_rgb(0x8F, 0xB3, 0xC9),
-        Color32::from_rgb(0xC7, 0xA2, 0xD8),
-        Color32::from_rgb(0xA8, 0xC7, 0x9A),
-        Color32::from_rgb(0xD9, 0x9A, 0x8F),
-        Color32::from_rgb(0xC9, 0xC2, 0x8F),
+        Color32::from_rgb(0x5B, 0x8C, 0xFF),
+        Color32::from_rgb(0xF2, 0x99, 0x4A),
+        Color32::from_rgb(0x2F, 0xB5, 0x9A),
+        Color32::from_rgb(0xB5, 0x65, 0xE6),
+        Color32::from_rgb(0xE5, 0x48, 0x8D),
+        Color32::from_rgb(0xD9, 0xA4, 0x1E),
     ];
     let h = name.to_lowercase().bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
     P[(h % P.len() as u32) as usize]
@@ -296,26 +296,6 @@ pub fn radial_glow(painter: &egui::Painter, center: Pos2, radius: f32, color: Co
     painter.add(Shape::mesh(mesh));
 }
 
-/// Круглый аватар с буквой. `glow` 0..1 — янтарное кольцо говорящего.
-pub fn avatar(painter: &egui::Painter, center: Pos2, r: f32, name: &str, glow: f32, dim: bool) {
-    avatar_glow(painter, center, r, glow);
-    let mut c = avatar_color(name);
-    if dim {
-        c = c.gamma_multiply(0.55);
-    }
-    painter.circle_filled(center, r, c);
-    let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-    painter.text(center, Align2::CENTER_CENTER, letter, xbold(r * 0.8), Color32::from_rgb(0x1B, 0x13, 0x0C));
-}
-
-/// Свечение и кольцо вокруг аватара говорящего.
-pub fn avatar_glow(painter: &egui::Painter, center: Pos2, r: f32, glow: f32) {
-    if glow > 0.01 {
-        radial_glow(painter, center, r + 6.0 + 22.0 * glow, accent_a((150.0 * glow) as u8));
-        painter.circle_stroke(center, r + 4.0, Stroke::new(2.5, self::p().accent.gamma_multiply(0.5 + 0.5 * glow)));
-    }
-}
-
 /// Текст «газоразрядной лампой»: янтарь + мягкое свечение.
 pub fn glow_text(painter: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, size: f32) -> Rect {
     let fid = display_font(size);
@@ -330,35 +310,41 @@ pub fn glow_text(painter: &egui::Painter, pos: Pos2, anchor: Align2, text: &str,
     painter.text(pos, anchor, text, fid, self::p().accent)
 }
 
-/// Логотип «Осциллограф»: «A» — всплеск на линии сигнала, перекладина — короткая волна. Без фона (минимализм).
-/// Координаты как в design/logo.svg (64×64). `lit` = false — приглушённый (неактивное окно).
-pub fn logo(painter: &egui::Painter, rect: Rect, lit: bool) {
+/// Точки знака «M-волна с глазами» (design/logo.svg, 64×64): линия звука, из которой вырастает M (пики — уши),
+/// две точки-глаза; толщина линии. На ≤24 px линия толще, иначе знак «рассыпается».
+pub fn logo_points(rect: Rect) -> (Vec<Pos2>, [Pos2; 2], f32) {
     let s = rect.width() / 64.0;
     let p = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let trace = vec![p(7.0, 46.0), p(18.0, 46.0), p(32.0, 13.0), p(46.0, 46.0), p(57.0, 46.0)];
-    let wave = vec![p(25.5, 34.0), p(29.5, 34.0), p(31.0, 31.0), p(33.0, 37.0), p(34.5, 34.0), p(37.5, 34.0)];
-    let core = (3.2 * s).max(1.7);
-    if lit {
-        for (k, a) in [(3.0, 22u8), (2.0, 40), (1.4, 70)] {
-            painter.add(Shape::line(trace.clone(), Stroke::new(core * k, accent_a(a))));
-            painter.add(Shape::line(wave.clone(), Stroke::new(core * k, accent_a(a))));
-        }
+    let line = [(2.0, 42.0), (10.0, 42.0), (14.0, 18.0), (24.0, 32.0), (32.0, 22.0), (40.0, 32.0), (50.0, 18.0), (54.0, 42.0), (62.0, 42.0)]
+        .iter()
+        .map(|&(x, y)| p(x, y))
+        .collect();
+    let width = if rect.width() <= 24.0 { 5.5 * s * 1.3 } else { 5.5 * s };
+    (line, [p(26.0, 44.0), p(38.0, 44.0)], width)
+}
+
+/// Знак Murmur. `lit` = false — приглушённый (неактивное окно).
+pub fn logo(painter: &egui::Painter, rect: Rect, lit: bool) {
+    let (line, eyes, width) = logo_points(rect);
+    let color = if lit { self::p().accent } else { self::p().text_muted };
+    painter.add(Shape::line(line.clone(), Stroke::new(width, color)));
+    // скруглённые стыки: кружки в вершинах
+    for q in &line {
+        painter.circle_filled(*q, width / 2.0, color);
     }
-    let color = if lit { self::p().accent } else { self::p().accent.gamma_multiply(0.45) };
-    painter.add(Shape::line(trace, Stroke::new(core, color)));
-    painter.add(Shape::line(wave, Stroke::new(core, color)));
-    if lit && s > 1.0 {
-        painter.circle_filled(p(32.0, 13.0), 1.2 * s, self::p().accent_hover);
+    let er = 2.6 * rect.width() / 64.0 * if rect.width() <= 24.0 { 1.3 } else { 1.0 };
+    for e in eyes {
+        painter.circle_filled(e, er, color);
     }
 }
 
-/// Логотип + «Amadeus».
+/// Знак + «Murmur».
 pub fn wordmark(ui: &mut Ui, logo_size: f32, text_size: f32) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(logo_size), Sense::hover());
         logo(ui.painter(), rect, true);
-        ui.add_space(2.0);
-        ui.label(egui::RichText::new("Amadeus").font(xbold(text_size)).color(self::p().text));
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Murmur").font(xbold(text_size)).color(self::p().text));
     });
 }
 
@@ -392,6 +378,20 @@ mod tests {
         }
         let (x, y) = (lum(a), lum(b));
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn logo_points_in_box() {
+        for size in [16.0, 24.0, 64.0, 110.0] {
+            let rect = Rect::from_min_size(pos2(10.0, 20.0), Vec2::splat(size));
+            let (line, eyes, width) = logo_points(rect);
+            assert_eq!(line.len(), 9);
+            for q in line.iter().chain(eyes.iter()) {
+                assert!(rect.contains(*q), "{size}: {q:?} вне {rect:?}");
+            }
+            // мелкий знак — линия толще относительно размера
+            assert!(width / size >= 5.5 / 64.0 - 1e-6);
+        }
     }
 
     #[test]

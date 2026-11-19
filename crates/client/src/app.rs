@@ -976,7 +976,7 @@ impl App {
             let glow = if vs.transmitting && vs.peers.first().is_some_and(|p| p.speaking) { 0.6 } else { 0.0 };
             match &me {
                 Some(u) => self.people.paint(ui.painter(), rect.center(), 17.0, u, glow, false),
-                None => t::avatar(ui.painter(), rect.center(), 17.0, &name, glow, false),
+                None => kit::avatar(ui.painter(), rect.center(), 17.0, &kit::AvatarInput { name: &name, texture: None }, glow, kit::PeerBadge::None, false),
             }
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;

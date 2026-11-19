@@ -7,10 +7,16 @@
 mod buttons;
 mod inputs;
 mod lists;
+mod misc;
+mod overlays;
+mod people;
 
 pub use buttons::*;
 pub use inputs::*;
 pub use lists::*;
+pub use misc::*;
+pub use overlays::*;
+pub use people::*;
 
 /// Скругление панелей, карточек, плиток.
 pub const R_CARD: u8 = 14;

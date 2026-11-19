@@ -5,11 +5,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::mpsc as std_mpsc;
 
-use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, TextureHandle, TextureOptions, pos2, vec2};
+use eframe::egui::{self, ColorImage, Pos2, TextureHandle, TextureOptions};
 use proto::{Author, PublicUser, User};
 
 use crate::api::Api;
-use crate::theme as t;
 
 /// Сторона текстуры аватара (пикселей): хватает на плитку комнаты (до ~92 логических точек при 150 %).
 const TEX_SIDE: u32 = 160;
@@ -158,15 +157,8 @@ impl People {
 }
 
 pub fn paint_avatar(painter: &egui::Painter, center: Pos2, r: f32, name: &str, tex: Option<&TextureHandle>, glow: f32, dim: bool) {
-    match tex {
-        Some(tex) => {
-            t::avatar_glow(painter, center, r, glow);
-            let tint = if dim { Color32::from_gray(140) } else { Color32::WHITE };
-            let rect = Rect::from_center_size(center, vec2(r * 2.0, r * 2.0));
-            painter.image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
-        }
-        None => t::avatar(painter, center, r, name, glow, dim),
-    }
+    let who = crate::kit::AvatarInput { name, texture: tex.map(|t| t.id()) };
+    crate::kit::avatar(painter, center, r, &who, glow, crate::kit::PeerBadge::None, dim);
 }
 
 /// Квадрат из середины картинки.
