@@ -12,9 +12,10 @@ path = "src/main.rs"
 # Установщик: `cargo packager -p client --release` (NSIS, в профиль пользователя, без прав администратора).
 # Полный выпуск (установщик + файлы для автообновления на сервер) — scripts/release.sh.
 [package.metadata.packager]
-productName = "Amadeus"
+# Название продукта — Murmur (редизайн 2026-11-19); identifier, имя exe, папка настроек %APPDATA%\Amadeus — прежние.
+productName = "Murmur"
 identifier = "ru.steins-gate.amadeus"
-publisher = "Amadeus"
+publisher = "Murmur"
 formats = ["nsis"]
 icons = ["assets/icon.ico"]
 beforePackagingCommand = "cargo build -p client --release"
@@ -24,8 +25,34 @@ installMode = "currentUser"
 languages = ["Russian"]
 customLanguageFiles = { Russian = "packaging/nsis/Russian.nsh" }
 installerIcon = "assets/icon.ico"
-# при удалении — галочка «удалить настройки» (по умолчанию выключена)
-appdataPaths = ["$APPDATA/$PRODUCTNAME"]
+# при удалении — галочка «удалить настройки» (по умолчанию выключена); настройки остались в %APPDATA%\Amadeus
+appdataPaths = ["$APPDATA/Amadeus"]
+# Переход со старой установки Amadeus (до Murmur): убрать её exe, ярлык, запись в «Приложениях» и автозапуск.
+# Настройки (%APPDATA%\Amadeus) не трогаем — вход сохраняется. Новый Murmur сам пропишет автозапуск при первом запуске.
+preinstallSection = '''
+Section "-RemoveAmadeus"
+  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Amadeus" "InstallLocation"
+  StrCmp $R0 "" amadeus_done
+  nsis_tauri_utils::KillProcess "amadeus.exe"
+  Pop $R1
+  Sleep 700
+  StrCpy $R2 $R0 1
+  StrCmp $R2 '"' 0 +3
+  StrCpy $R0 $R0 "" 1
+  StrCpy $R0 $R0 -1
+  Delete "$R0\amadeus.exe"
+  Delete "$R0\amadeus.exe.old"
+  Delete "$R0\uninstall.exe"
+  RMDir "$R0"
+  Delete "$SMPROGRAMS\Amadeus\Amadeus.lnk"
+  RMDir "$SMPROGRAMS\Amadeus"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Amadeus"
+  DeleteRegKey HKCU "Software\Amadeus\Amadeus"
+  DeleteRegKey /ifempty HKCU "Software\Amadeus"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus"
+  amadeus_done:
+SectionEnd
+'''
 
 [dependencies]
 proto = { path = "../proto" }

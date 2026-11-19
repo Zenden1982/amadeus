@@ -40,6 +40,8 @@ enum Msg {
     Invite(ApiResult<Invite>),
     /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
     Profile(Result<Option<User>, String>),
+    /// Установщик Murmur скачан (переход со старой установки).
+    Legacy(Result<std::path::PathBuf, String>),
 }
 
 #[derive(PartialEq)]
@@ -150,6 +152,10 @@ pub struct App {
     hide_until: Option<Instant>,
     /// Демо-режим без сервера (только debug, AMADEUS_DEMO).
     demo: bool,
+    /// Запущены из старой установки Amadeus — окно «поставьте Murmur» (legacy.rs).
+    legacy: bool,
+    legacy_busy: bool,
+    legacy_error: Option<String>,
     #[cfg(debug_assertions)]
     gallery: crate::gallery::GalleryState,
 }
@@ -265,6 +271,9 @@ impl App {
             autostart_error,
             hide_until: None,
             demo: false,
+            legacy: crate::legacy::detect(),
+            legacy_busy: false,
+            legacy_error: None,
             #[cfg(debug_assertions)]
             gallery: Default::default(),
         };
@@ -455,6 +464,17 @@ impl App {
                 Msg::Invite(res) => {
                     self.invite_busy = false;
                     self.invite = Some(res.map_err(|e: ApiError| e.message));
+                }
+                Msg::Legacy(res) => {
+                    self.legacy_busy = false;
+                    match res {
+                        Ok(path) if desktop::run_file(&path) => {
+                            log::info!("установщик Murmur запущен — выхожу");
+                            <Self as eframe::App>::on_exit(self);
+                        }
+                        Ok(_) => self.legacy_error = Some("не удалось запустить установщик".into()),
+                        Err(e) => self.legacy_error = Some(e),
+                    }
                 }
             }
         }
@@ -1796,6 +1816,40 @@ impl App {
     }
 
     /// Окно «Доступно обновление».
+    /// Окно перехода: старая установка Amadeus получила Murmur автообновлением — нужен новый установщик.
+    fn ui_legacy(&mut self, ui: &mut Ui) {
+        let mut later = false;
+        let mut start = false;
+        let res = kit::modal(ui.ctx(), "legacy", "Amadeus теперь Murmur", 440.0, |ui| {
+            ui.label(RichText::new("Программа сменила название. Чтобы ярлык, «Пуск» и список программ тоже стали Murmur, поставьте новый установщик — он заменит старую версию.").size(14.5).color(t::p().text));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Вход и настройки сохранятся.").size(13.5).color(t::p().text_muted));
+            if let Some(e) = &self.legacy_error {
+                ui.add_space(8.0);
+                kit::notice(ui, kit::Notice::Error, &format!("Не получилось: {e}"), false);
+            }
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                let text = if self.legacy_busy { "Скачиваю…" } else { "Скачать и установить" };
+                if kit::button_ex(ui, kit::ButtonKind::Primary, text, Some(egui_phosphor::fill::DOWNLOAD_SIMPLE), !self.legacy_busy).clicked() {
+                    start = true;
+                }
+                if kit::button(ui, kit::ButtonKind::Ghost, "Позже", None).clicked() {
+                    later = true;
+                }
+            });
+        });
+        if start {
+            self.legacy_busy = true;
+            self.legacy_error = None;
+            let base = self.api.base().to_string();
+            self.spawn(crate::legacy::download_installer(base), Msg::Legacy);
+        }
+        if later || (res == kit::ModalResult::Closed && !self.legacy_busy) {
+            self.legacy = false; // до следующего запуска
+        }
+    }
+
     fn ui_update(&mut self, ui: &mut Ui) {
         let Some(info) = self.updater.available.clone() else {
             self.update_open = false;
@@ -2340,6 +2394,9 @@ impl eframe::App for App {
         }
         if self.update_open {
             self.ui_update(ui);
+        }
+        if self.legacy {
+            self.ui_legacy(ui);
         }
         self.ui_metrics(ui);
         if !self.fullscreen {

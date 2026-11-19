@@ -55,6 +55,29 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// Строковое значение из HKCU (`value` = "" — значение по умолчанию). Нет ключа/значения — None.
+    pub fn hkcu_string(key: &str, value: &str) -> Option<String> {
+        use windows_sys::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
+        let (k, v) = (wide(key), wide(value));
+        let mut buf = vec![0u16; 1024];
+        let mut len = (buf.len() * 2) as u32;
+        let rc = unsafe {
+            RegGetValueW(HKEY_CURRENT_USER, k.as_ptr(), v.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len)
+        };
+        if rc != 0 {
+            return None;
+        }
+        let n = (len as usize / 2).saturating_sub(1);
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+
+    /// Открыть файл как из проводника (установщик запускается со своим UAC/окном).
+    pub fn run_file(path: &Path) -> bool {
+        let (verb, file) = (wide("open"), wide(&path.to_string_lossy()));
+        let h = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+        h as isize > 32
+    }
+
     pub fn claim_single_instance() -> bool {
         let name = wide(&format!("Local\\{}", instance_tag()));
         // Мьютекс не закрываем: живёт до конца процесса.
@@ -240,6 +263,32 @@ pub fn open_url(url: &str) {
 }
 
 /// Путь к своему exe.
+/// Строковое значение реестра HKCU (только Windows).
+pub fn hkcu_string(key: &str, value: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        win::hkcu_string(key, value)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (key, value);
+        None
+    }
+}
+
+/// Запустить файл (установщик).
+pub fn run_file(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        win::run_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 pub fn current_exe() -> Option<PathBuf> {
     std::env::current_exe().ok().map(|p| dunce_simplify(&p))
 }

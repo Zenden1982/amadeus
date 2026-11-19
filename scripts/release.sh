@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Выпуск клиента Amadeus: установщик + файлы автообновления → папка выпусков бэкенда.
+# Выпуск клиента Murmur (бывш. Amadeus): установщик + файлы автообновления → папка выпусков бэкенда.
 #
 #   scripts/release.sh "Что нового (одна-две строки)"            — собрать и выложить на домашний сервер
 #   NO_UPLOAD=1 scripts/release.sh "…"                             — только собрать в dist/<версия>/
@@ -17,16 +17,18 @@ REMOTE_DIR="${REMOTE_DIR:-/srv/data/amadeus/backend/releases}"
 
 VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "не понял версию: '$VERSION'"; exit 1; }
-echo "== Amadeus $VERSION"
+echo "== Murmur $VERSION"
 
 cargo packager -p client --release
 
 OUT="dist/$VERSION"
 mkdir -p "$OUT"
 EXE="amadeus-$VERSION.exe"
-SETUP="amadeus-setup-$VERSION.exe"
+SETUP="murmur-setup-$VERSION.exe"
 cp target/release/amadeus.exe "$OUT/$EXE"
-cp "target/release/amadeus_${VERSION}_x64-setup.exe" "$OUT/$SETUP"
+# cargo-packager называет установщик по productName (раньше amadeus_…, теперь murmur_…/Murmur_…)
+BUILT=$(ls target/release/*_"${VERSION}"_x64-setup.exe | head -1)
+cp "$BUILT" "$OUT/$SETUP"
 gzip -kf9 "$OUT/$EXE"   # сервер отдаёт .gz клиентам с Accept-Encoding: gzip (~в 3 раза меньше)
 
 SHA=$(sha256sum "$OUT/$EXE" | cut -d' ' -f1)

@@ -1,7 +1,6 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Значок приложения «Осциллограф» без фона (exe, трей, установщик). Растр — scripts/make_icon.py. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64" fill="none">
-  <defs><filter id="g" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-  <g filter="url(#g)" stroke="#FF9A3C" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M7 46h11L32 13l14 33h11"/><path d="M25.5 34h4l1.5-3 2 6 1.5-3h3"/></g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Murmur: «M-волна с глазами» — линия звука, из которой вырастает M (пики — уши), две точки-глаза. -->
+  <path d="M2 42 L10 42 L14 18 L24 32 L32 22 L40 32 L50 18 L54 42 L62 42" fill="none" stroke="#5B8CFF" stroke-width="5.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="26" cy="44" r="2.6" fill="#5B8CFF"/>
+  <circle cx="38" cy="44" r="2.6" fill="#5B8CFF"/>
 </svg>

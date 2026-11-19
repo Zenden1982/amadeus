@@ -11,6 +11,7 @@ mod frame;
 #[cfg(debug_assertions)]
 mod gallery;
 mod kit;
+mod legacy;
 mod metrics;
 mod mictest;
 mod people;
@@ -50,7 +51,7 @@ fn main() -> eframe::Result {
         desktop::wait_pid_exit(pid, 15_000);
     }
     if !desktop::claim_single_instance() {
-        log::info!("Amadeus уже запущен — показываю его окно");
+        log::info!("Murmur уже запущен — показываю его окно");
         return Ok(());
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -61,7 +62,7 @@ fn main() -> eframe::Result {
         .expect("tokio runtime");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Amadeus")
+            .with_title("Murmur")
             // своя рамка и заголовок — frame.rs
             .with_decorations(false)
             .with_inner_size([1120.0, 700.0])

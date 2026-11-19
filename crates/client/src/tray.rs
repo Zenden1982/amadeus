@@ -1,4 +1,4 @@
-//! Значок в трее: клик — показать окно, меню «Открыть Amadeus / Выйти».
+//! Значок в трее: клик — показать окно, меню «Открыть Murmur / Выйти».
 //! Обработчики вызываются в UI-потоке из цикла сообщений Windows — даже когда окно спрятано и кадры не рисуются,
 //! поэтому окно показываем прямо отсюда (`desktop::show`), а выход передаём через флаг.
 
@@ -32,12 +32,12 @@ mod imp {
             let rgba = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
             let (w, h) = rgba.dimensions();
             let icon = Icon::from_rgba(rgba.into_raw(), w, h).ok()?;
-            let open = MenuItem::new("Открыть Amadeus", true, None);
+            let open = MenuItem::new("Открыть Murmur", true, None);
             let exit = MenuItem::new("Выйти", true, None);
             let menu = Menu::with_items(&[&open, &PredefinedMenuItem::separator(), &exit]).ok()?;
             let tray = TrayIconBuilder::new()
                 .with_icon(icon)
-                .with_tooltip("Amadeus")
+                .with_tooltip("Murmur")
                 .with_menu(Box::new(menu))
                 .with_menu_on_left_click(false)
                 .build()
