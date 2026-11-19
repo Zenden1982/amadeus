@@ -54,6 +54,11 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, text: &str, icon: Option<&str>) -> 
     pill(ui, kind, text, icon, None, 40.0, true)
 }
 
+/// Кнопка-«таблетка», которую можно выключить (серая, не нажимается).
+pub fn button_ex(ui: &mut Ui, kind: ButtonKind, text: &str, icon: Option<&str>, enabled: bool) -> Response {
+    pill(ui, kind, text, icon, None, 40.0, enabled)
+}
+
 /// Широкая кнопка заданной ширины (высота 44) — главное действие формы.
 pub fn button_wide(ui: &mut Ui, kind: ButtonKind, text: &str, width: f32, enabled: bool) -> Response {
     pill(ui, kind, text, None, Some(width), 44.0, enabled)

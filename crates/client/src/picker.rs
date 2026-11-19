@@ -112,8 +112,8 @@ impl Picker {
             .frame(
                 Frame::new()
                     .fill(t::p().surface)
-                    .stroke(Stroke::new(1.0, t::p().border_strong))
-                    .corner_radius(CornerRadius::same(14))
+                    .stroke(Stroke::new(1.0, t::p().border))
+                    .corner_radius(CornerRadius::same(18))
                     .inner_margin(Margin::symmetric(28, 24))
                     .shadow(ctx.global_style().visuals.window_shadow),
             )
@@ -165,10 +165,9 @@ impl Picker {
                 let galley = ui.painter().layout_no_wrap(text, t::semibold(14.0), t::p().text);
                 let (rect, resp) = ui.allocate_exact_size(galley.size() + vec2(28.0, 16.0), Sense::click());
                 let p = ui.painter();
-                let fill = if on { t::accent_a(30) } else if resp.hovered() { t::p().surface_2 } else { Color32::TRANSPARENT };
-                let stroke = if on { Stroke::new(1.0, t::accent_a(150)) } else { Stroke::new(1.0, t::p().border) };
-                p.rect(rect, CornerRadius::same(255), fill, stroke, StrokeKind::Inside);
-                p.galley(rect.center() - galley.size() / 2.0, galley, if on { t::p().accent_hover } else { t::p().text_muted });
+                let fill = if on { t::p().accent_soft } else if resp.hovered() { t::p().row_hover } else { t::p().surface_3 };
+                p.rect(rect, CornerRadius::same(255), fill, Stroke::NONE, StrokeKind::Inside);
+                p.galley(rect.center() - galley.size() / 2.0, galley, if on { t::p().accent } else { t::p().text_muted });
                 if resp.clicked() {
                     self.tab = tab;
                 }
@@ -226,15 +225,10 @@ impl Picker {
     fn card(&self, ui: &Ui, rect: Rect, s: &Source, selected: bool, hovered: bool, thumb_h: f32) {
         let p = ui.painter();
         let (thumb, icon) = self.tex.get(&s.id).cloned().unwrap_or((None, None));
-        if selected {
-            for i in 0..3 {
-                p.rect_filled(rect.expand(2.0 + i as f32 * 3.0), CornerRadius::same(14 + 3 * i as u8), t::accent_a(9));
-            }
-        }
         let fill = if hovered || selected { t::p().row_hover } else { t::p().surface_2 };
-        p.rect_filled(rect, CornerRadius::same(12), fill);
+        p.rect_filled(rect, CornerRadius::same(kit::R_CARD), fill);
         let tr = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 16.0, thumb_h - 8.0));
-        p.rect_filled(tr, CornerRadius::same(8), t::p().bg);
+        p.rect_filled(tr, CornerRadius::same(kit::R_ROW), t::p().video_bg);
         match &thumb {
             Some(tex) => {
                 let size = tex.size_vec2();
@@ -257,7 +251,7 @@ impl Picker {
             }
         }
         let stroke = if selected { Stroke::new(2.0, t::p().accent) } else if hovered { Stroke::new(1.0, t::p().border_strong) } else { Stroke::new(1.0, t::p().border) };
-        p.rect_stroke(rect, CornerRadius::same(12), stroke, StrokeKind::Inside);
+        p.rect_stroke(rect, CornerRadius::same(kit::R_CARD), stroke, StrokeKind::Inside);
 
         // подпись: иконка + заголовок, ниже — программа/разрешение
         let ty = rect.top() + thumb_h + 10.0;
@@ -306,7 +300,7 @@ impl Picker {
                         out = Some(Action::Start { source: s.id, title: s.title.clone(), width: s.width, height: s.height, preset: self.preset, audio: self.audio });
                     }
                 ui.add_space(6.0);
-                if ui.button("Отмена").clicked() {
+                if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
                     out = Some(Action::Cancel);
                 }
             });

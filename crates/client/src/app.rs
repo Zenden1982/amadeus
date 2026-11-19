@@ -1810,9 +1810,9 @@ impl App {
             .frame(
                 Frame::new()
                     .fill(t::p().surface)
-                    .stroke(Stroke::new(1.0, t::p().border_strong))
-                    .corner_radius(CornerRadius::same(14))
-                    .inner_margin(Margin::symmetric(32, 28))
+                    .stroke(Stroke::new(1.0, t::p().border))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(Margin::symmetric(30, 26))
                     .shadow(ui.visuals().window_shadow),
             )
             .show(ui.ctx(), |ui| {
@@ -1859,7 +1859,7 @@ impl App {
                     if kit::button_wide(ui, kit::ButtonKind::Primary, "Обновить и перезапустить", 230.0, !busy).clicked() {
                         self.updater.install();
                     }
-                    if ui.add_enabled(!busy, egui::Button::new("Позже")).clicked() {
+                    if !busy && kit::button(ui, kit::ButtonKind::Ghost, "Позже", None).clicked() {
                         close = true;
                     }
                 });
@@ -1935,11 +1935,11 @@ impl App {
             ui.label(status.size(13.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.updater.available.is_some() {
-                    if ui.button(format!("{} Обновить", ph::ARROW_CIRCLE_UP)).clicked() {
+                    if kit::button(ui, kit::ButtonKind::Primary, "Обновить", Some(egui_phosphor::fill::ARROW_CIRCLE_UP)).clicked() {
                         self.update_open = true;
                         self.settings_open = false;
                     }
-                } else if ui.add_enabled(!self.updater.checking, egui::Button::new("Проверить обновления")).clicked() {
+                } else if kit::button_ex(ui, kit::ButtonKind::Secondary, "Проверить обновления", None, !self.updater.checking).clicked() {
                     self.updater.check();
                 }
             });
@@ -1968,10 +1968,10 @@ impl App {
                 ui.label(RichText::new(format!("логин: {}", me.name)).size(13.0).color(t::p().text_muted));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!busy, egui::Button::new(format!("{} Сменить аватар…", ph::IMAGE))).clicked() {
+                    if kit::button_ex(ui, kit::ButtonKind::Secondary, "Сменить аватар…", Some(egui_phosphor::fill::IMAGE), !busy).clicked() {
                         self.pick_avatar();
                     }
-                    if me.avatar.is_some() && ui.add_enabled(!busy, egui::Button::new("Убрать")).clicked() {
+                    if me.avatar.is_some() && kit::button_ex(ui, kit::ButtonKind::Ghost, "Убрать", None, !busy).clicked() {
                         self.profile_busy = true;
                         self.profile_error = None;
                         let api = self.api.clone();
@@ -1989,7 +1989,7 @@ impl App {
             );
             let changed = self.profile_name.trim() != me.display_name.as_deref().unwrap_or("");
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.add_enabled(!busy && changed, egui::Button::new("Сохранить")).clicked() || (enter && changed)) && !busy {
+            if (kit::button_ex(ui, kit::ButtonKind::Primary, "Сохранить", None, !busy && changed).clicked() || (enter && changed)) && !busy {
                 self.profile_busy = true;
                 self.profile_error = None;
                 let (api, name) = (self.api.clone(), self.profile_name.trim().to_string());
@@ -2042,9 +2042,9 @@ impl App {
             .frame(
                 Frame::new()
                     .fill(t::p().surface)
-                    .stroke(Stroke::new(1.0, t::p().border_strong))
-                    .corner_radius(CornerRadius::same(14))
-                    .inner_margin(Margin::symmetric(32, 28))
+                    .stroke(Stroke::new(1.0, t::p().border))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(Margin::symmetric(30, 26))
                     .shadow(ui.visuals().window_shadow),
             )
             .show(ui.ctx(), |ui| {
@@ -2074,14 +2074,13 @@ impl App {
                     level_meter(ui, level, w);
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        let (text, active) = if self.mic_playback {
-                            (format!("{}  Остановить проверку", ph::STOP), true)
+                        let clicked = if self.mic_playback {
+                            kit::button(ui, kit::ButtonKind::Primary, "Остановить проверку", Some(egui_phosphor::fill::STOP))
                         } else {
-                            (format!("{}  Слышать себя", ph::HEADPHONES), false)
-                        };
-                        let btn = egui::Button::new(RichText::new(text).color(if active { t::p().on_accent } else { t::p().text }))
-                            .fill(if active { t::p().accent } else { t::p().surface_2 });
-                        if ui.add(btn).clicked() {
+                            kit::button(ui, kit::ButtonKind::Secondary, "Слышать себя", Some(egui_phosphor::fill::HEADPHONES))
+                        }
+                        .clicked();
+                        if clicked {
                             self.mic_playback = !self.mic_playback;
                         }
                         let hint = match &self.mic_test_error {
@@ -2115,7 +2114,7 @@ impl App {
                         }
                         ui.add_space(10.0);
                         if self.ptt.capturing() {
-                            if ui.button("Отмена").clicked() {
+                            if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
                                 self.ptt.cancel_capture();
                             }
                             ui.label(RichText::new("нажмите клавишу…").color(t::p().accent).size(13.0));
@@ -2189,7 +2188,7 @@ impl App {
                         }
                         ui.label(RichText::new(format!("· {}", self.settings.server_url)).size(13.0).color(t::p().text_muted));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button(format!("{} Выйти", ph::SIGN_OUT)).clicked() {
+                            if kit::button(ui, kit::ButtonKind::Secondary, "Выйти", Some(egui_phosphor::fill::SIGN_OUT)).clicked() {
                                 close = true;
                                 self.logout();
                             }
@@ -2199,7 +2198,7 @@ impl App {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             let busy = self.invite_busy;
-                            if ui.add_enabled(!busy, egui::Button::new(format!("{} Создать приглашение", ph::TICKET))).clicked() {
+                            if kit::button_ex(ui, kit::ButtonKind::Primary, "Создать приглашение", Some(egui_phosphor::fill::TICKET), !busy).clicked() {
                                 self.invite_busy = true;
                                 let api = self.api.clone();
                                 self.spawn(async move { api.create_invite().await }, Msg::Invite);
@@ -2208,8 +2207,8 @@ impl App {
                                 Some(Ok(inv)) => {
                                     let code = inv.code.clone();
                                     let (rect, _) = ui.allocate_exact_size(vec2(230.0, 34.0), Sense::hover());
-                                    t::glow_text(ui.painter(), rect.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &code, 24.0);
-                                    if ui.button(ph::COPY).on_hover_text("Скопировать").clicked() {
+                                    ui.painter().text(rect.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &code, t::xbold(22.0), t::p().accent);
+                                    if kit::icon_button(ui, ph::COPY, kit::IconState::Normal, "Скопировать").clicked() {
                                         ui.ctx().copy_text(code);
                                     }
                                 }
@@ -2560,8 +2559,8 @@ fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32, people: &People) {
 fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
     let title: String = if s.title.chars().count() > 28 { s.title.chars().take(27).chain(['…']).collect() } else { s.title.clone() };
     let resp = Frame::new()
-        .fill(t::accent_a(18))
-        .stroke(Stroke::new(1.0, t::accent_a(110)))
+        .fill(t::p().accent_soft)
+        .stroke(Stroke::NONE)
         .corner_radius(CornerRadius::same(255))
         .inner_margin(Margin::symmetric(14, 6))
         .show(ui, |ui| {
@@ -2672,12 +2671,8 @@ fn level_meter(ui: &mut Ui, level: Option<f32>, w: f32) {
     let p = ui.painter();
     for i in 0..n {
         let r = Rect::from_min_size(rect.min + vec2(i as f32 * (seg + gap), 0.0), vec2(seg, 14.0));
-        if i < lit {
-            p.rect_filled(r.expand(1.5), CornerRadius::same(3), t::accent_a(50));
-            p.rect_filled(r, CornerRadius::same(2), t::p().accent);
-        } else {
-            p.rect_filled(r, CornerRadius::same(2), t::p().surface_3);
-        }
+        let color = if i < lit { t::p().speaking } else { t::p().surface_3 };
+        p.rect_filled(r, CornerRadius::same(255), color);
     }
 }
 
