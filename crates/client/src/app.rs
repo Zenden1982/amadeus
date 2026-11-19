@@ -120,6 +120,8 @@ pub struct App {
     focus: Option<String>,
     /// Полноэкранный просмотр трансляции `focus`.
     fullscreen: bool,
+    /// Окно было развёрнуто до полного экрана (вернуть при выходе).
+    fs_was_maximized: bool,
     /// Что последним сообщили движку о видимости/размере трансляций.
     views_sent: HashMap<String, (bool, u32, u32)>,
     /// Последнее движение мыши (в полном экране панель и курсор прячутся).
@@ -253,6 +255,7 @@ impl App {
             video,
             focus: None,
             fullscreen: false,
+            fs_was_maximized: false,
             views_sent: HashMap::new(),
             pointer_moved_at: Instant::now(),
             views_frame: HashMap::new(),
@@ -820,6 +823,19 @@ impl App {
                 self.watch(&p.identity);
             }
         }
+        // AMADEUS_AUTOMAX=1 — сначала развернуть окно, полный экран — через 2 с (как у пользователя: из развёрнутого).
+        static MAXED: Mutex<Option<Instant>> = Mutex::new(None);
+        if std::env::var_os("AMADEUS_AUTOMAX").is_some() {
+            let mut m = MAXED.lock().unwrap();
+            if m.is_none() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                *m = Some(Instant::now());
+            }
+            if m.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
+                return;
+            }
+        }
         if std::env::var_os("AMADEUS_AUTOFULLSCREEN").is_some()
             && let Some(f) = self.focus.clone()
             && self.video.frame(&f).is_some()
@@ -1381,7 +1397,20 @@ impl App {
             self.fullscreen = on;
             self.pointer_moved_at = Instant::now();
             crate::frame::set_fullscreen_style(on);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+            // Из развёрнутого окна winit оставляет клиентскую область размером рабочей области (экран минус панель
+            // задач) — снизу была чёрная полоса высотой с панель задач. Поэтому сначала «восстановить», потом полный экран.
+            if on {
+                self.fs_was_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                if self.fs_was_maximized {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                if std::mem::take(&mut self.fs_was_maximized) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                }
+            }
         }
     }
 

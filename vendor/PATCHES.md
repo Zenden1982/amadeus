@@ -29,6 +29,13 @@
 - `webrtc-sys/src/amadeus.rs` + `pub mod amadeus` в `lib.rs` — Rust-обёртки (обычный `extern "C"`, не cxx).
 - Клиент: `crates/client/src/denoise.rs` (DeepFilterNet3 / RNNoise в колбэке), `voice.rs::apply_processing`.
 
+## Встроенный AEC Windows выключен навсегда (2026-11-19)
+`webrtc-sys/src/adm_proxy.cpp`: `BuiltInAECIsAvailable()` → `false`, `EnableBuiltInAEC(true)` → `-1` (false → 0 без вызова ADM).
+Иначе `WebRtcVoiceEngine::ApplyOptions` при echo_cancellation=true включал Voice Capture DMO, а он пишет микрофон
+**16 кГц моно** (полоса до 8 кГц — «глухой» звук; в логе «захват микрофона: 16000 Гц»), и включение «залипало» до
+выхода из программы (повторное выключение при инициализированной записи — «Attempt to set Windows AEC with recording
+already initialized»). Эхоподавление теперь только программное AEC3 (48 кГц).
+
 ## Удалено из webrtc-sys
 - `src/lazy_load_deps_for/` (4,6 МБ) — нужен только для Linux-сборки desktop_capturer. Для сборки под Linux вернуть
   из оригинального крейта.

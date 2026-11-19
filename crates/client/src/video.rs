@@ -110,7 +110,11 @@ impl VideoHub {
     /// Отладка вёрстки (AMADEUS_DEMO): синтетическая «картинка трансляции».
     #[cfg(debug_assertions)]
     pub fn put_demo(&self, identity: &str, t: f32) {
-        let (w, h) = (640usize, 360usize);
+        // AMADEUS_DEMO_SIZE=640x348 — другой размер кадра (проверка полей при несовпадении пропорций).
+        let (w, h) = std::env::var("AMADEUS_DEMO_SIZE")
+            .ok()
+            .and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+            .unwrap_or((640usize, 360usize));
         let mut px = vec![Color32::BLACK; w * h];
         for y in 0..h {
             for x in 0..w {

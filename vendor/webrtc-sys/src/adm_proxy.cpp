@@ -830,10 +830,11 @@ int32_t AdmProxy::PlayoutDelay(uint16_t* delayMS) const {
   });
 }
 
+// Amadeus patch: встроенный AEC Windows (Voice Capture DMO) пишет микрофон в 16 кГц моно — всё выше 8 кГц
+// срезается («глухой» голос), а наш колбэк шумодава получает не 48 кГц. Говорим WebRTC, что его нет: тогда
+// WebRtcVoiceEngine не включает DMO и при echo_cancellation использует программный AEC3 на полной полосе.
 bool AdmProxy::BuiltInAECIsAvailable() const {
-  return WithPlatformAdm<bool>(false, [](webrtc::AudioDeviceModule& adm) {
-    return adm.BuiltInAECIsAvailable();
-  });
+  return false;
 }
 
 bool AdmProxy::BuiltInAGCIsAvailable() const {
@@ -849,9 +850,9 @@ bool AdmProxy::BuiltInNSIsAvailable() const {
 }
 
 int32_t AdmProxy::EnableBuiltInAEC(bool enable) {
-  return WithPlatformAdm<int32_t>(-1, [enable](webrtc::AudioDeviceModule& adm) {
-    return adm.EnableBuiltInAEC(enable);
-  });
+  // Amadeus patch: включить DMO нельзя (см. BuiltInAECIsAvailable); выключение — без обращения к ADM
+  // (DMO никогда не включается, а вызов при инициализированной записи только пишет ошибку в лог).
+  return enable ? -1 : 0;
 }
 
 int32_t AdmProxy::EnableBuiltInAGC(bool enable) {
