@@ -1,7 +1,7 @@
-//! «Лаборатория ночью»: палитра, шрифты и рисованные элементы из design/mockup-phase3.html.
+//! Тема Murmur: палитры (тёмная/светлая), шрифт Nunito, визуалы egui, знак. Детали интерфейса — модуль `kit`.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Sense,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Sense,
     Shape, Stroke, TextStyle, Ui, Vec2, pos2, vec2,
 };
 
@@ -145,7 +145,6 @@ pub fn accent_a(a: u8) -> Color32 {
 pub const SEMIBOLD: &str = "nunito-semibold";
 pub const BOLD: &str = "nunito-bold";
 pub const XBOLD: &str = "nunito-xbold";
-pub const NIXIE_FONT: &str = "nixie";
 pub const PH_FILL: &str = "phosphor-fill";
 
 pub fn font(size: f32) -> FontId {
@@ -160,9 +159,6 @@ pub fn bold(size: f32) -> FontId {
 pub fn xbold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(XBOLD.into()))
 }
-pub fn display_font(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name(NIXIE_FONT.into()))
-}
 pub fn icon_fill(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(PH_FILL.into()))
 }
@@ -176,7 +172,6 @@ pub fn install(ctx: &egui::Context) {
     add(&mut fonts, SEMIBOLD, include_bytes!("../assets/fonts/Nunito-SemiBold.ttf"));
     add(&mut fonts, BOLD, include_bytes!("../assets/fonts/Nunito-Bold.ttf"));
     add(&mut fonts, XBOLD, include_bytes!("../assets/fonts/Nunito-ExtraBold.ttf"));
-    add(&mut fonts, NIXIE_FONT, include_bytes!("../assets/fonts/NixieOne-Regular.ttf"));
     add(&mut fonts, "phosphor", egui_phosphor::Variant::Regular.font_bytes());
     add(&mut fonts, PH_FILL, egui_phosphor::Variant::Fill.font_bytes());
 
@@ -191,8 +186,6 @@ pub fn install(ctx: &egui::Context) {
     for name in [SEMIBOLD, BOLD, XBOLD] {
         fonts.families.insert(FontFamily::Name(name.into()), family(name, "phosphor"));
     }
-    // Nixie One — только цифры и латиница; остальное — Manrope.
-    fonts.families.insert(FontFamily::Name(NIXIE_FONT.into()), family(NIXIE_FONT, "nunito"));
     fonts.families.insert(FontFamily::Name(PH_FILL.into()), family(PH_FILL, "nunito"));
     ctx.set_fonts(fonts);
 
@@ -265,49 +258,6 @@ pub fn avatar_color(name: &str) -> Color32 {
     ];
     let h = name.to_lowercase().bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
     P[(h % P.len() as u32) as usize]
-}
-
-/// Плавное радиальное свечение (меш с градиентом по вершинам — без «колец»).
-pub fn radial_glow(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32) {
-    let mut mesh = egui::Mesh::default();
-    let segs = 48;
-    let rings = [(0.0, 1.0), (0.35, 0.6), (0.7, 0.22), (1.0, 0.0)];
-    mesh.colored_vertex(center, color);
-    for &(r, a) in &rings[1..] {
-        for i in 0..segs {
-            let ang = i as f32 / segs as f32 * std::f32::consts::TAU;
-            mesh.colored_vertex(center + vec2(ang.cos(), ang.sin()) * radius * r, color.gamma_multiply(a));
-        }
-    }
-    let seg = segs as u32;
-    for i in 0..seg {
-        let j = (i + 1) % seg;
-        mesh.add_triangle(0, 1 + i, 1 + j);
-    }
-    for ring in 0..(rings.len() as u32 - 2) {
-        let a0 = 1 + ring * seg;
-        let b0 = a0 + seg;
-        for i in 0..seg {
-            let j = (i + 1) % seg;
-            mesh.add_triangle(a0 + i, b0 + i, b0 + j);
-            mesh.add_triangle(a0 + i, b0 + j, a0 + j);
-        }
-    }
-    painter.add(Shape::mesh(mesh));
-}
-
-/// Текст «газоразрядной лампой»: янтарь + мягкое свечение.
-pub fn glow_text(painter: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, size: f32) -> Rect {
-    let fid = display_font(size);
-    let spread = (size / 18.0).clamp(1.0, 5.0);
-    for (i, (dx, dy)) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (0.7, 0.7), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7)]
-        .iter()
-        .enumerate()
-    {
-        let a = if i < 4 { 46 } else { 30 };
-        painter.text(pos + vec2(dx * spread, dy * spread), anchor, text, fid.clone(), Color32::from_rgba_unmultiplied(255, 120, 30, a));
-    }
-    painter.text(pos, anchor, text, fid, self::p().accent)
 }
 
 /// Точки знака «M-волна с глазами» (design/logo.svg, 64×64): линия звука, из которой вырастает M (пики — уши),

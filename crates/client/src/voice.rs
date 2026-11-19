@@ -1046,7 +1046,7 @@ impl Engine {
                         Err(e) => log::error!("публикация звука трансляции: {e}"),
                     }
                 }
-                AudioStatus::On(if source.is_window() { "звук приложения" } else { "весь звук, кроме Amadeus" })
+                AudioStatus::On(if source.is_window() { "звук приложения" } else { "весь звук, кроме Murmur" })
             }
             Err(e) => {
                 log::error!("звук трансляции: {e}");

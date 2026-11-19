@@ -543,31 +543,30 @@ impl App {
     fn ui_boot(&mut self, ui: &mut Ui) {
         egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
             let r = ui.max_rect();
-            let p = ui.painter();
-            t::logo(p, Rect::from_center_size(r.center() - vec2(0.0, 40.0), vec2(96.0, 96.0)), true);
-            match &self.boot_error {
+            t::logo(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 50.0), vec2(96.0, 96.0)), true);
+            let area = Rect::from_center_size(r.center() + vec2(0.0, 60.0), vec2(460.0, 140.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| match &self.boot_error {
                 None => {
-                    p.text(r.center() + vec2(0.0, 40.0), Align2::CENTER_CENTER, "Подключаемся к серверу…", t::font(15.0), t::p().text_muted);
+                    ui.vertical_centered(|ui| {
+                        kit::spinner(ui, 24.0);
+                        ui.label(RichText::new("Подключаемся к серверу…").size(15.0).color(t::p().text_muted));
+                    });
                 }
                 Some(err) => {
                     let err = err.clone();
-                    let area = Rect::from_center_size(r.center() + vec2(0.0, 80.0), vec2(420.0, 120.0));
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.label(RichText::new(format!("{} {err}", ph::WARNING_CIRCLE)).color(t::p().danger_text));
-                            ui.horizontal(|ui| {
-                                ui.add_space(120.0);
-                                if ui.button("Повторить").clicked() {
-                                    self.fetch_me();
-                                }
-                                if ui.button("Выйти").clicked() {
-                                    self.logout();
-                                }
-                            });
-                        });
+                    kit::notice(ui, kit::Notice::Error, &err, false);
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(130.0);
+                        if kit::button(ui, kit::ButtonKind::Primary, "Повторить", None).clicked() {
+                            self.fetch_me();
+                        }
+                        if kit::button(ui, kit::ButtonKind::Ghost, "Выйти", None).clicked() {
+                            self.logout();
+                        }
                     });
                 }
-            }
+            });
         });
     }
 
@@ -579,22 +578,21 @@ impl App {
             .frame(Frame::new().fill(t::p().surface).inner_margin(Margin { left: 44, right: 44, top: 56, bottom: 56 }))
             .show(ui, |ui| {
                 let r = ui.max_rect();
-                ui.painter().vline(r.left() - 44.0, ui.clip_rect().y_range(), Stroke::new(1.0, t::p().border_strong));
+                ui.painter().vline(r.left() - 44.0, ui.clip_rect().y_range(), Stroke::new(1.0, t::p().border));
                 self.ui_login_form(ui);
             });
         egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::symmetric(64, 56))).show(ui, |ui| {
             let r = ui.max_rect();
             let p = ui.painter().clone();
-            // мягкое янтарное свечение за числом
-            let c = pos2(r.left() + r.width() * 0.3, r.top() + r.height() * 0.62);
-            t::radial_glow(&p, c, 380.0, t::p().accent_soft);
-            t::wordmark(ui, 52.0, 26.0);
+            t::wordmark(ui, 44.0, 26.0);
+            // кот и подпись — по центру левой части
             let mid = r.center().y;
-            t::glow_text(&p, pos2(r.left(), mid + 10.0), Align2::LEFT_BOTTOM, "1.048596", 120.0);
+            kit::mascot(&p, Rect::from_center_size(pos2(r.left() + 90.0, mid - 70.0), vec2(180.0, 180.0)), kit::MascotPose::Sitting);
+            p.text(pos2(r.left(), mid + 40.0), Align2::LEFT_TOP, "Созвоны, игры и учёба —\nсо своими.", t::xbold(30.0), t::p().text);
             p.text(
-                pos2(r.left(), mid + 30.0),
+                pos2(r.left(), mid + 136.0),
                 Align2::LEFT_TOP,
-                "Голосовой чат для своих.\nПопасть сюда можно только по приглашению.",
+                "Голос, трансляции экрана и чат. Попасть сюда можно только по приглашению.",
                 t::font(15.0),
                 t::p().text_muted,
             );
@@ -614,11 +612,11 @@ impl App {
                         }
                         Some(mut s) => {
                             ui.label(RichText::new(ph::HARD_DRIVES).color(t::p().text_muted));
-                            let r = ui.add(TextEdit::singleline(&mut s).desired_width(280.0).hint_text("https://api.example.ru"));
+                            let r = ui.add(kit::text_field(&mut s, 280.0).hint_text("https://api.example.ru"));
                             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            if ui.button("OK").clicked() || enter {
+                            if kit::button(ui, kit::ButtonKind::Primary, "OK", None).clicked() || enter {
                                 self.apply_server(&s);
-                            } else if ui.button("Отмена").clicked() {
+                            } else if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
                             } else {
                                 self.login.server_edit = Some(s);
                             }
@@ -633,17 +631,17 @@ impl App {
         let w = ui.available_width();
         // вкладки
         let (tabs_rect, _) = ui.allocate_exact_size(vec2(w, 42.0), Sense::hover());
-        ui.painter().rect_filled(tabs_rect, CornerRadius::same(10), t::p().bg);
+        ui.painter().rect_filled(tabs_rect, CornerRadius::same(255), t::p().surface_3);
         let half = (tabs_rect.width() - 8.0) / 2.0;
         for (i, (tab, label)) in [(Tab::Login, "Вход"), (Tab::Invite, "У меня приглашение")].into_iter().enumerate() {
             let rr = Rect::from_min_size(tabs_rect.min + vec2(4.0 + half * i as f32, 4.0), vec2(half, 34.0));
             let resp = ui.interact(rr, Id::new(("tab", i)), Sense::click());
             let on = self.login.tab == tab;
             if on {
-                ui.painter().rect_filled(rr, CornerRadius::same(7), t::p().surface_2);
+                ui.painter().rect_filled(rr, CornerRadius::same(255), t::p().surface);
             }
             let color = if on || resp.hovered() { t::p().text } else { t::p().text_muted };
-            ui.painter().text(rr.center(), Align2::CENTER_CENTER, label, t::semibold(14.0), color);
+            ui.painter().text(rr.center(), Align2::CENTER_CENTER, label, t::bold(14.0), color);
             if resp.clicked() && !on {
                 self.login.tab = tab;
                 self.login.error = None;
@@ -659,11 +657,11 @@ impl App {
             ui.add_space(12.0);
         }
         label(ui, "Ник");
-        let r = ui.add(field(&mut self.login.name, w).hint_text("например, okabe"));
+        let r = ui.add(kit::text_field(&mut self.login.name, w).hint_text("например, okabe"));
         submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(12.0);
         label(ui, "Пароль");
-        let r = ui.add(field(&mut self.login.password, w).password(true));
+        let r = ui.add(kit::text_field(&mut self.login.password, w).password(true));
         submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.add_space(14.0);
         if let Some(err) = &self.login.error {
@@ -686,7 +684,7 @@ impl App {
         }
     }
 
-    /// Три сегмента кода «газоразрядными» цифрами; вставка целиком раскладывается по сегментам.
+    /// Три сегмента кода; вставка целиком раскладывается по сегментам.
     fn invite_input(&mut self, ui: &mut Ui, w: f32) {
         let ids = [Id::new("inv0"), Id::new("inv1"), Id::new("inv2")];
         let dash_w = 14.0;
@@ -697,12 +695,12 @@ impl App {
                 let resp = ui.add(
                     TextEdit::singleline(&mut self.login.invite[i])
                         .id(ids[i])
-                        .font(t::display_font(26.0))
-                        .text_color(t::p().accent)
+                        .font(t::xbold(24.0))
+                        .text_color(t::p().text)
                         .horizontal_align(Align::Center)
                         .desired_width(seg_w)
                         .margin(Margin::symmetric(10, 6))
-                        .hint_text(RichText::new("····").font(t::display_font(26.0)).color(t::p().border_strong)),
+                        .hint_text(RichText::new("····").font(t::xbold(24.0)).color(t::p().text_faint)),
                 );
                 if resp.changed() {
                     edited = Some(i);
@@ -1985,7 +1983,7 @@ impl App {
         ui.horizontal(|ui| {
             let r = ui.add_enabled(
                 !busy,
-                field(&mut self.profile_name, w - 130.0).hint_text(format!("пусто — показывать логин «{}»", me.name)).char_limit(proto::limits::DISPLAY_NAME_MAX),
+                kit::text_field(&mut self.profile_name, w - 130.0).hint_text(format!("пусто — показывать логин «{}»", me.name)).char_limit(proto::limits::DISPLAY_NAME_MAX),
             );
             let changed = self.profile_name.trim() != me.display_name.as_deref().unwrap_or("");
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -2487,10 +2485,6 @@ fn overlay_button(ui: &Ui, center: Pos2, icon: &str, tip: &str, id: Id) -> egui:
 
 fn label(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(13.0).color(t::p().text_muted));
-}
-
-fn field(text: &mut String, w: f32) -> TextEdit<'_> {
-    TextEdit::singleline(text).desired_width(w).margin(Margin::symmetric(13, 10)).font(t::font(15.0))
 }
 
 fn group_label(ui: &mut Ui, text: &str) {
