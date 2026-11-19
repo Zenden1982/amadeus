@@ -44,6 +44,18 @@ def render(size):
         sq = Image.new('RGBA', (side + 2 * margin, side + 2 * margin), (0, 0, 0, 0))
         sq.paste(img, (margin + (side - img.size[0]) // 2, margin + (side - img.size[1]) // 2), img)
         img = sq
+    # плитка: синий скруглённый квадрат во весь значок, знак белый (как у Discord/Telegram — читается крупно)
+    tile = Image.new('RGBA', (W, W), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tile)
+    pad = int(W * (0.02 if small else 0.04))
+    td.rounded_rectangle([pad, pad, W - 1 - pad, W - 1 - pad], radius=int(W * 0.24), fill=ACCENT + (255,))
+    white = Image.new('RGBA', img.size, (255, 255, 255, 0))
+    white.putalpha(img.getchannel('A'))
+    mark_side = int(W * (0.66 if small else 0.60))
+    white = white.resize((mark_side, mark_side), Image.LANCZOS)
+    off2 = (W - mark_side) // 2
+    tile.paste(white, (off2, off2 + int(W * 0.01)), white)
+    img = tile
     return img.resize((size, size), Image.LANCZOS)
 
 sizes = [16, 20, 24, 32, 48, 64, 128, 256]
