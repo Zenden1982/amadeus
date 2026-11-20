@@ -103,6 +103,8 @@ pub struct Settings {
     pub theme: ThemePref,
     /// Последний открытый сервер.
     pub last_server: Option<i64>,
+    /// Свёрнутые категории каналов (id).
+    pub collapsed_categories: Vec<i64>,
 }
 
 impl Default for Settings {
@@ -128,6 +130,7 @@ impl Default for Settings {
             autostart: true,
             theme: ThemePref::default(),
             last_server: None,
+            collapsed_categories: Vec::new(),
         }
     }
 }

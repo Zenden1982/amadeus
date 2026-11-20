@@ -3,6 +3,7 @@
 
 mod api;
 mod app;
+mod channels_ui;
 mod chat;
 mod config;
 mod crash;

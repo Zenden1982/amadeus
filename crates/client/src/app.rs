@@ -14,6 +14,7 @@ use egui_phosphor::regular as ph;
 use proto::{AuthResponse, Channel, ChannelKind, InvitePreview, User};
 
 use crate::api::{self, Api, ApiResult};
+use crate::channels_ui::{self, ChannelsUi};
 use crate::chat::Chat;
 use crate::config::{NoiseMode, Settings, ThemePref};
 use crate::desktop::{self, Window};
@@ -102,6 +103,7 @@ pub struct App {
     /// Серверы, раскладки, участники, голос (фаза 9.1).
     model: crate::model::Model,
     servers: ServersUi,
+    channel_list: ChannelsUi,
     /// Каналы активного сервера (из модели; в демо — свои).
     channels: Vec<Channel>,
     channels_at: Instant,
@@ -201,6 +203,7 @@ impl App {
         let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
         let people = People::new(rt.handle().clone(), ctx.clone(), api.clone());
         let servers = ServersUi::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let channel_list = ChannelsUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let updater = Updater::new(rt.handle().clone(), ctx.clone(), api.clone());
         let window = Window::from_cc(cc);
         desktop::mark_window(window);
@@ -245,6 +248,7 @@ impl App {
             me: None,
             model: Default::default(),
             servers,
+            channel_list,
             channels: Vec::new(),
             channels_at: Instant::now(),
             settings_open: false,
@@ -440,6 +444,7 @@ impl App {
         self.chat.set_api(api.clone());
         self.people.set_api(api.clone());
         self.servers.set_api(api.clone());
+        self.channel_list.set_api(api.clone());
         self.model = Default::default();
         self.updater.set_api(api.clone());
         self.view = View::Voice;
@@ -831,7 +836,7 @@ impl App {
         };
         match text_channel {
             Some(ch) => {
-                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open();
+                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open();
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal, &self.people);
                 });
@@ -845,6 +850,7 @@ impl App {
         self.ui_banner(ui, &vs);
         self.ui_volume_popup(ui, &vs);
         self.servers.dialogs(ui.ctx());
+        self.channel_list.dialogs(ui.ctx());
         if self.settings_open {
             self.ui_settings(ui, &vs);
         }
@@ -1038,6 +1044,50 @@ impl App {
     }
 
     fn ui_channel_list(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        if self.demo || self.model.active.is_none() {
+            self.ui_channel_list_plain(ui, vs);
+            return;
+        }
+        let my_voice = match (&vs.channel, &vs.conn) {
+            (Some(c), Conn::Connected) => Some((c.id, vs.peers.as_slice())),
+            _ => None,
+        };
+        let before = self.settings.collapsed_categories.clone();
+        let open_text = match self.view {
+            View::Text(id) => Some(id),
+            View::Voice => None,
+        };
+        let cx = channels_ui::ListCtx {
+            model: &self.model,
+            people: &self.people,
+            my_voice,
+            open_text,
+            collapsed: &mut self.settings.collapsed_categories,
+        };
+        let (pick, moved) = self.channel_list.list(ui, cx);
+        if self.settings.collapsed_categories != before {
+            self.settings.save();
+        }
+        if let Some(m) = moved {
+            self.model.set_layout(m.server, m.layout);
+            self.sync_channels();
+        }
+        match pick {
+            Some(channels_ui::Pick::Voice(ch)) => {
+                let here = vs.channel.as_ref().is_some_and(|c| c.id == ch.id) && vs.conn == Conn::Connected;
+                // уже в этом канале — просто вернуться к сцене (из чата)
+                if !here {
+                    self.voice.send(Cmd::Join(ch));
+                }
+                self.view = View::Voice;
+            }
+            Some(channels_ui::Pick::Text(id)) => self.view = View::Text(id),
+            None => {}
+        }
+    }
+
+    /// Без серверов (или демо): плоский список, как до фазы 9.1.
+    fn ui_channel_list_plain(&mut self, ui: &mut Ui, vs: &VoiceState) {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.add_space(6.0);
         group_label(ui, "Голосовые каналы");
@@ -1529,7 +1579,7 @@ impl App {
             self.set_fullscreen(&ctx, false);
         }
         let modal_open =
-            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.view != View::Voice;
+            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.view != View::Voice;
         let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 && !modal_open {
             if self.fullscreen {
@@ -2457,6 +2507,7 @@ impl eframe::App for App {
             }
             self.model.apply(&e);
         }
+        self.channel_list.poll(&mut self.model);
         let out = self.servers.poll(&mut self.model, &mut self.people);
         if out.unauthorized {
             self.logout();
@@ -2659,7 +2710,7 @@ fn peer_name(people: &People, p: &Peer) -> String {
     peer_user(people, p).shown_name().to_string()
 }
 
-fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
+pub(crate) fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
     let glow = speak_glow(ui, p);
