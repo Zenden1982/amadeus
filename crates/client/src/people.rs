@@ -12,8 +12,6 @@ use crate::api::Api;
 
 /// Сторона текстуры аватара (пикселей): хватает на плитку комнаты (до ~92 логических точек при 150 %).
 const TEX_SIDE: u32 = 160;
-/// Сторона аватара, который уходит на сервер.
-pub const UPLOAD_SIDE: u32 = 256;
 
 enum Tex {
     Loading,
@@ -163,15 +161,6 @@ pub fn round_image(bytes: &[u8], side: u32) -> Result<ColorImage, String> {
     Ok(ColorImage::from_rgba_unmultiplied([side as usize, side as usize], &px))
 }
 
-/// Файл с диска → квадрат из середины, `UPLOAD_SIDE` px, PNG (то, что уходит на сервер).
-pub fn prepare_upload(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(bytes).map_err(|_| "Это не картинка (нужны PNG, JPEG, GIF, WebP).".to_string())?;
-    let sq = center_square(img).resize_exact(UPLOAD_SIDE, UPLOAD_SIDE, image::imageops::FilterType::Lanczos3).to_rgba8();
-    let mut out = std::io::Cursor::new(Vec::new());
-    sq.write_to(&mut out, image::ImageFormat::Png).map_err(|e| format!("PNG: {e}"))?;
-    Ok(out.into_inner())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,13 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn upload_is_square_png_256() {
-        let out = prepare_upload(&png(800, 300)).unwrap();
-        let img = image::load_from_memory(&out).unwrap();
-        assert_eq!((img.width(), img.height()), (UPLOAD_SIDE, UPLOAD_SIDE));
-    }
-
-    #[test]
     fn round_has_transparent_corners() {
         let ci = round_image(&png(100, 100), 64).unwrap();
         assert_eq!(ci.size, [64, 64]);
@@ -198,10 +180,6 @@ mod tests {
         assert_eq!(ci.pixels[32 * 64 + 32].a(), 255);
     }
 
-    #[test]
-    fn not_an_image() {
-        assert!(prepare_upload(b"hello").is_err());
-    }
 }
 
 #[cfg(test)]

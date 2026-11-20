@@ -8,6 +8,7 @@ use egui_phosphor::regular as ph;
 use proto::{ChannelLayout, Invite, InvitePreview, Member, Server, VoiceRoster, limits, perm};
 
 use crate::api::{self, Api, ApiResult};
+use crate::crop::{self, CropDialog, CropResult};
 use crate::kit::{self, ButtonKind};
 use crate::model::Model;
 use crate::people::{self, People};
@@ -35,7 +36,7 @@ enum Ev {
     Preview { code: String, res: Result<InvitePreview, String> },
     Invite(Result<Invite, String>),
     Left { server: i64, res: Result<(), String> },
-    Icon(Result<Option<Vec<u8>>, String>),
+    Icon(Result<Option<image::DynamicImage>, String>),
 }
 
 /// Что сделал человек в колонке/меню (обрабатывает App).
@@ -93,6 +94,8 @@ pub struct ServersUi {
     leave: Option<LeaveDialog>,
     loaded_once: bool,
     pub load_error: Option<String>,
+    /// Обрезка значка нового сервера.
+    crop: Option<CropDialog>,
 }
 
 /// Буквы для значка без картинки: первые буквы двух первых слов (или одна буква).
@@ -107,8 +110,8 @@ async fn load_one(api: &Api, server: Server) -> ApiResult<Loaded> {
     Ok(Loaded { server, layout: Some(layout?), members: members?, voice: voice.unwrap_or_default() })
 }
 
-/// Выбрать картинку с диска → квадрат 256 px PNG (окно обрезки — задача 18).
-pub fn pick_image(title: &str) -> Result<Option<Vec<u8>>, String> {
+/// Выбрать картинку с диска и прочитать (дальше — окно обрезки). Блокирует — вызывать в `spawn_blocking`.
+pub fn pick_image(title: &str) -> Result<Option<image::DynamicImage>, String> {
     let Some(path) = rfd::FileDialog::new()
         .set_title(title)
         .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
@@ -117,13 +120,13 @@ pub fn pick_image(title: &str) -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     };
     let bytes = std::fs::read(&path).map_err(|e| format!("Не читается файл: {e}"))?;
-    people::prepare_upload(&bytes).map(Some)
+    crop::load(&bytes).map(Some)
 }
 
 impl ServersUi {
     pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, api: Api) -> Self {
         let (tx, rx) = std_mpsc::channel();
-        Self { rt, ctx, api, tx, rx, add: None, invite: None, leave: None, loaded_once: false, load_error: None }
+        Self { rt, ctx, api, tx, rx, add: None, invite: None, leave: None, loaded_once: false, load_error: None, crop: None }
     }
 
     /// Новая сессия: забыть всё (старые задачи пишут в закрытый канал).
@@ -239,12 +242,9 @@ impl ServersUi {
                 Ev::Icon(res) => {
                     if let Some(d) = self.add.as_mut() {
                         match res {
-                            Ok(Some(png)) => {
-                                d.icon_tex = people::round_image(&png, 112)
-                                    .ok()
-                                    .map(|ci| self.ctx.load_texture("new-server-icon", ci, TextureOptions::LINEAR));
-                                d.icon = Some(png);
+                            Ok(Some(img)) => {
                                 d.error = None;
+                                self.crop = Some(CropDialog::new(&self.ctx, "Значок сервера", img));
                             }
                             Ok(None) => {}
                             Err(e) => d.error = Some(e),
@@ -258,6 +258,23 @@ impl ServersUi {
 
     pub fn modal_open(&self) -> bool {
         self.add.is_some() || self.invite.is_some() || self.leave.is_some()
+    }
+
+    fn ui_crop(&mut self, ctx: &egui::Context) {
+        let Some(c) = self.crop.as_mut() else { return };
+        match c.ui(ctx) {
+            CropResult::Open => {}
+            CropResult::Cancel => self.crop = None,
+            CropResult::Done(png) => {
+                self.crop = None;
+                if let Some(d) = self.add.as_mut() {
+                    d.icon_tex = people::round_image(&png, 112)
+                        .ok()
+                        .map(|ci| self.ctx.load_texture("new-server-icon", ci, TextureOptions::LINEAR));
+                    d.icon = Some(png);
+                }
+            }
+        }
     }
 
     fn open_add(&mut self) {
@@ -360,6 +377,7 @@ impl ServersUi {
 
     pub fn dialogs(&mut self, ctx: &egui::Context) {
         self.ui_add(ctx);
+        self.ui_crop(ctx);
         self.ui_invite(ctx);
         self.ui_leave(ctx);
     }

@@ -7,6 +7,7 @@ mod channels_ui;
 mod chat;
 mod config;
 mod crash;
+mod crop;
 mod denoise;
 mod desktop;
 mod frame;

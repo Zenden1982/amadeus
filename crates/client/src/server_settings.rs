@@ -58,7 +58,7 @@ enum Ev {
     Done { res: Result<(), String>, refresh: bool },
     Bans(Result<Vec<Ban>, String>),
     Invites(Result<Vec<Invite>, String>),
-    Icon(Result<Option<Vec<u8>>, String>),
+    Icon(Result<Option<image::DynamicImage>, String>),
 }
 
 pub struct ServerSettings {
@@ -76,6 +76,7 @@ pub struct ServerSettings {
     busy: bool,
     error: Option<String>,
     icon_preview: Option<TextureHandle>,
+    crop: Option<crate::crop::CropDialog>,
 }
 
 impl ServerSettings {
@@ -96,6 +97,7 @@ impl ServerSettings {
             busy: false,
             error: None,
             icon_preview: None,
+            crop: None,
         }
     }
 
@@ -173,15 +175,7 @@ impl ServerSettings {
                 Ev::Bans(r) => self.bans = Some(r),
                 Ev::Invites(r) => self.invites = Some(r),
                 Ev::Icon(r) => match r {
-                    Ok(Some(png)) => {
-                        self.icon_preview = people::round_image(&png, 112)
-                            .ok()
-                            .map(|ci| self.ctx.load_texture("server-icon-preview", ci, TextureOptions::LINEAR));
-                        if let Some(s) = self.server {
-                            let api = self.api.clone();
-                            self.act(false, async move { api.put_server_icon(s, png).await.map(|_| ()) });
-                        }
-                    }
+                    Ok(Some(img)) => self.crop = Some(crate::crop::CropDialog::new(&self.ctx, "Значок сервера", img)),
                     Ok(None) => {}
                     Err(e) => self.error = Some(e),
                 },
@@ -242,7 +236,21 @@ impl ServerSettings {
             }
         });
         self.ui_confirm(ctx, server);
-        if res == kit::ModalResult::Closed && self.confirm.is_none() {
+        if let Some(c) = self.crop.as_mut() {
+            match c.ui(ctx) {
+                crate::crop::CropResult::Open => {}
+                crate::crop::CropResult::Cancel => self.crop = None,
+                crate::crop::CropResult::Done(png) => {
+                    self.crop = None;
+                    self.icon_preview = people::round_image(&png, 112)
+                        .ok()
+                        .map(|ci| self.ctx.load_texture("server-icon-preview", ci, TextureOptions::LINEAR));
+                    let api = self.api.clone();
+                    self.act(false, async move { api.put_server_icon(server, png).await.map(|_| ()) });
+                }
+            }
+        }
+        if res == kit::ModalResult::Closed && self.confirm.is_none() && self.crop.is_none() {
             self.server = None;
         }
     }

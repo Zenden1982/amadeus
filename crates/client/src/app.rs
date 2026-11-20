@@ -42,6 +42,8 @@ enum Msg {
     Preview(String, Result<InvitePreview, String>),
     /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
     Profile(Result<Option<User>, String>),
+    /// Картинка для аватара выбрана — открыть обрезку.
+    AvatarPicked(Result<Option<image::DynamicImage>, String>),
     /// Установщик Murmur скачан (переход со старой установки).
     Legacy(Result<std::path::PathBuf, String>),
 }
@@ -105,6 +107,7 @@ pub struct App {
     servers: ServersUi,
     channel_list: ChannelsUi,
     server_settings: crate::server_settings::ServerSettings,
+    avatar_crop: Option<crate::crop::CropDialog>,
     /// Каналы активного сервера (из модели; в демо — свои).
     channels: Vec<Channel>,
     channels_at: Instant,
@@ -252,6 +255,7 @@ impl App {
             servers,
             channel_list,
             server_settings,
+            avatar_crop: None,
             channels: Vec::new(),
             channels_at: Instant::now(),
             settings_open: false,
@@ -503,6 +507,14 @@ impl App {
                         Err(e) => self.login.error = Some(e.message),
                     }
                 }
+                Msg::AvatarPicked(res) => match res {
+                    Ok(Some(img)) => self.avatar_crop = Some(crate::crop::CropDialog::new(&self.ctx, "Аватар", img)),
+                    Ok(None) => self.profile_busy = false,
+                    Err(e) => {
+                        self.profile_busy = false;
+                        self.profile_error = Some(e);
+                    }
+                },
                 Msg::Preview(code, res) => {
                     self.login.preview = Some((code, res));
                 }
@@ -856,6 +868,7 @@ impl App {
         self.servers.dialogs(ui.ctx());
         self.channel_list.dialogs(ui.ctx());
         self.server_settings.ui(ui.ctx(), &self.model, &self.people);
+        self.ui_avatar_crop(ui.ctx());
         if self.settings_open {
             self.ui_settings(ui, &vs);
         }
@@ -2205,33 +2218,32 @@ impl App {
         }
     }
 
-    /// Выбрать картинку → квадрат из середины, 256 px PNG → `PUT /me/avatar`.
+    /// Выбрать картинку → окно обрезки → 256 px PNG → `PUT /me/avatar`.
     fn pick_avatar(&mut self) {
         self.profile_busy = true;
         self.profile_error = None;
-        let api = self.api.clone();
         self.spawn(
             async move {
-                let picked = tokio::task::spawn_blocking(|| -> Result<Option<Vec<u8>>, String> {
-                    let Some(path) = rfd::FileDialog::new()
-                        .set_title("Аватар")
-                        .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
-                        .pick_file()
-                    else {
-                        return Ok(None);
-                    };
-                    let bytes = std::fs::read(&path).map_err(|e| format!("Не читается файл: {e}"))?;
-                    people::prepare_upload(&bytes).map(Some)
-                })
-                .await
-                .map_err(|e| e.to_string())??;
-                match picked {
-                    None => Ok(None),
-                    Some(png) => api.put_avatar(png).await.map(Some).map_err(|e| e.message),
-                }
+                tokio::task::spawn_blocking(|| servers_ui::pick_image("Аватар")).await.map_err(|e| e.to_string())?
             },
-            Msg::Profile,
+            Msg::AvatarPicked,
         );
+    }
+
+    fn ui_avatar_crop(&mut self, ctx: &egui::Context) {
+        let Some(c) = self.avatar_crop.as_mut() else { return };
+        match c.ui(ctx) {
+            crate::crop::CropResult::Open => {}
+            crate::crop::CropResult::Cancel => {
+                self.avatar_crop = None;
+                self.profile_busy = false;
+            }
+            crate::crop::CropResult::Done(png) => {
+                self.avatar_crop = None;
+                let api = self.api.clone();
+                self.spawn(async move { api.put_avatar(png).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+            }
+        }
     }
 
     fn ui_settings(&mut self, ui: &mut Ui, vs: &VoiceState) {
