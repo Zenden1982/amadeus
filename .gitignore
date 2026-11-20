@@ -8,3 +8,11 @@ deploy/generated/
 dist/
 .superpowers/brainstorm/
 data/
+
+# Внутренние заметки (копия — на домашнем сервере ~/backups/murmur)
+/CLAUDE.md
+/HANDOFF.md
+/NOTES.md
+/PLAN.md
+/TESTING.md
+/docs/superpowers/
