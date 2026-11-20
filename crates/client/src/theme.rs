@@ -2,7 +2,7 @@
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Sense,
-    Shape, Stroke, TextStyle, Ui, Vec2, pos2, vec2,
+    Stroke, TextStyle, Ui, pos2, vec2,
 };
 
 /// Смысловые цвета темы. Экраны берут цвета только отсюда: `t::p().text` и т. п.
@@ -305,42 +305,110 @@ pub fn avatar_color(name: &str) -> Color32 {
     P[(h % P.len() as u32) as usize]
 }
 
-/// Точки знака «M-волна с глазами» (design/logo.svg, 64×64): линия звука, из которой вырастает M (пики — уши),
-/// две точки-глаза; толщина линии. На ≤24 px линия толще, иначе знак «рассыпается».
-pub fn logo_points(rect: Rect) -> (Vec<Pos2>, [Pos2; 2], f32) {
+/// Знак Murmur «волна-кот» (пакет бренда, `logo/murmur-logo.svg`, 64×64): линия звука вырастает в M с ушами, две точки-глаза.
+/// На ≤ 24 px — упрощённый знак (`murmur-logo-small.svg`: без хвостов, толще). Рисуем кодом — растеризатор SVG не нужен.
+struct Mark {
+    line: &'static [(f32, f32)],
+    eyes: [(f32, f32); 2],
+    eye_r: f32,
+    width: f32,
+}
+const MARK: Mark = Mark {
+    line: &[(3.0, 46.0), (11.0, 46.0), (17.0, 15.0), (25.0, 25.0), (39.0, 25.0), (47.0, 15.0), (53.0, 46.0), (61.0, 46.0)],
+    eyes: [(26.5, 36.0), (37.5, 36.0)],
+    eye_r: 3.0,
+    width: 5.5,
+};
+const MARK_SMALL: Mark = Mark {
+    line: &[(9.0, 52.0), (15.0, 12.0), (25.0, 25.0), (39.0, 25.0), (49.0, 12.0), (55.0, 52.0)],
+    eyes: [(26.0, 38.0), (38.0, 38.0)],
+    eye_r: 4.5,
+    width: 8.0,
+};
+
+/// Точки знака в `rect` (квадрат): ломаная, глаза, толщина линии, радиус глаз.
+pub fn logo_points(rect: Rect) -> (Vec<Pos2>, [Pos2; 2], f32, f32) {
+    let m = if rect.width() <= 24.0 { &MARK_SMALL } else { &MARK };
     let s = rect.width() / 64.0;
-    let p = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let line = [(2.0, 42.0), (10.0, 42.0), (14.0, 18.0), (24.0, 32.0), (32.0, 22.0), (40.0, 32.0), (50.0, 18.0), (54.0, 42.0), (62.0, 42.0)]
-        .iter()
-        .map(|&(x, y)| p(x, y))
-        .collect();
-    let width = if rect.width() <= 24.0 { 5.5 * s * 1.3 } else { 5.5 * s };
-    (line, [p(26.0, 44.0), p(38.0, 44.0)], width)
+    let p = |(x, y): (f32, f32)| pos2(rect.left() + x * s, rect.top() + y * s);
+    (m.line.iter().map(|&q| p(q)).collect(), [p(m.eyes[0]), p(m.eyes[1])], m.width * s, m.eye_r * s)
+}
+
+/// Линия со скруглёнными стыками и концами (как stroke-linejoin/linecap="round" в SVG).
+fn round_stroke(painter: &egui::Painter, pts: &[Pos2], width: f32, color: Color32) {
+    for w in pts.windows(2) {
+        painter.line_segment([w[0], w[1]], Stroke::new(width, color));
+    }
+    for q in pts {
+        painter.circle_filled(*q, width / 2.0, color);
+    }
 }
 
 /// Знак Murmur. `lit` = false — приглушённый (неактивное окно).
 pub fn logo(painter: &egui::Painter, rect: Rect, lit: bool) {
-    let (line, eyes, width) = logo_points(rect);
+    let (line, eyes, width, eye_r) = logo_points(rect);
     let color = if lit { self::p().accent } else { self::p().text_muted };
-    painter.add(Shape::line(line.clone(), Stroke::new(width, color)));
-    // скруглённые стыки: кружки в вершинах
-    for q in &line {
-        painter.circle_filled(*q, width / 2.0, color);
-    }
-    let er = 2.6 * rect.width() / 64.0 * if rect.width() <= 24.0 { 1.3 } else { 1.0 };
+    round_stroke(painter, &line, width, color);
     for e in eyes {
-        painter.circle_filled(e, er, color);
+        painter.circle_filled(e, eye_r, color);
     }
 }
 
-/// Знак + «Murmur».
-pub fn wordmark(ui: &mut Ui, logo_size: f32, text_size: f32) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(logo_size), Sense::hover());
-        logo(ui.painter(), rect, true);
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Murmur").font(xbold(text_size)).color(self::p().text));
-    });
+/// Дуга окружности (центр, радиус, углы в градусах; экранные координаты — угол растёт по часовой).
+fn arc(out: &mut Vec<(f32, f32)>, c: (f32, f32), r: f32, from: f32, to: f32) {
+    const N: usize = 14;
+    for i in 0..=N {
+        let a = (from + (to - from) * i as f32 / N as f32).to_radians();
+        out.push((c.0 + r * a.cos(), c.1 + r * a.sin()));
+    }
+}
+
+/// Штрихи слова «mur» из надписи бренда (`logo/murmur-lockup-*.svg`, буквы — контуры, не шрифт), в координатах буквы m = 0.
+fn mur_strokes() -> Vec<Vec<(f32, f32)>> {
+    let with_arc = |start: &[(f32, f32)], c: (f32, f32), r: f32, from: f32, to: f32, end: &[(f32, f32)]| {
+        let mut v = start.to_vec();
+        arc(&mut v, c, r, from, to);
+        v.extend_from_slice(end);
+        v
+    };
+    vec![
+        // m: две арки
+        with_arc(&[(0.0, 44.0)], (6.5, 29.0), 6.5, 180.0, 360.0, &[(13.0, 44.0)]),
+        with_arc(&[], (19.5, 29.0), 6.5, 180.0, 360.0, &[(26.0, 44.0)]),
+        // u: чаша и правая ножка
+        with_arc(&[(35.0, 22.0)], (41.5, 37.0), 6.5, 180.0, 0.0, &[]),
+        vec![(48.0, 22.0), (48.0, 44.0)],
+        // r: ножка и плечо (дуга r=8 из (57,31) в (68,23.5))
+        vec![(57.0, 44.0), (57.0, 22.0)],
+        with_arc(&[], (65.0, 30.916), 8.0, 179.4, 292.03, &[]),
+    ]
+}
+
+/// Знак + надпись «murmur» (лого бренда): первая половина — цвет текста, вторая — акцент («мур-мур»).
+/// `left_top` — левый верхний угол, `height` — высота (вся надпись — 222 × 42 в единицах макета). Возвращает занятый прямоугольник.
+pub fn paint_lockup(painter: &egui::Painter, left_top: Pos2, height: f32, lit: bool) -> Rect {
+    let s = height / 42.0;
+    let map = |(x, y): (f32, f32)| pos2(left_top.x + x * s, left_top.y + (y - 10.0) * s);
+    let pal = self::p();
+    let (mark_c, first_c, second_c) = if lit { (pal.accent, pal.text, pal.accent) } else { (pal.text_muted, pal.text_muted, pal.text_muted) };
+    let line: Vec<Pos2> = MARK.line.iter().map(|&q| map(q)).collect();
+    round_stroke(painter, &line, MARK.width * s, mark_c);
+    for e in MARK.eyes {
+        painter.circle_filled(map(e), MARK.eye_r * s, mark_c);
+    }
+    for (dx, color) in [(74.0, first_c), (149.0, second_c)] {
+        for stroke in mur_strokes() {
+            let pts: Vec<Pos2> = stroke.iter().map(|&(x, y)| map((x + dx, y + 2.0))).collect();
+            round_stroke(painter, &pts, 5.0 * s, color);
+        }
+    }
+    Rect::from_min_size(left_top, vec2(222.0 * s, height))
+}
+
+/// Лого бренда в разметке (экран входа, витрина): высота `height`.
+pub fn wordmark(ui: &mut Ui, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(222.0 * height / 42.0, height), Sense::hover());
+    paint_lockup(ui.painter(), rect.min, height, true);
 }
 
 /// Русское склонение: 1 участник, 2 участника, 5 участников.
@@ -378,15 +446,33 @@ mod tests {
     #[test]
     fn logo_points_in_box() {
         for size in [16.0, 24.0, 64.0, 110.0] {
-            let rect = Rect::from_min_size(pos2(10.0, 20.0), Vec2::splat(size));
-            let (line, eyes, width) = logo_points(rect);
-            assert_eq!(line.len(), 9);
+            let rect = Rect::from_min_size(pos2(10.0, 20.0), egui::Vec2::splat(size));
+            let (line, eyes, width, _) = logo_points(rect);
+            assert_eq!(line.len(), if size <= 24.0 { 6 } else { 8 });
             for q in line.iter().chain(eyes.iter()) {
                 assert!(rect.contains(*q), "{size}: {q:?} вне {rect:?}");
             }
             // мелкий знак — линия толще относительно размера
             assert!(width / size >= 5.5 / 64.0 - 1e-6);
+            if size <= 24.0 {
+                assert!(width / size >= 8.0 / 64.0 - 1e-6);
+            }
         }
+    }
+
+    #[test]
+    fn mur_strokes_in_box() {
+        // буквы «mur» умещаются в 0..70 по x и 22..44 по y (как в SVG), дуги заканчиваются в нужных точках
+        for st in mur_strokes() {
+            for &(x, y) in &st {
+                assert!((-0.01..=70.0).contains(&x) && (21.9..=44.01).contains(&y), "({x}, {y})");
+            }
+        }
+        let r = mur_strokes().pop().unwrap();
+        let (sx, sy) = r[0];
+        let (ex, ey) = *r.last().unwrap();
+        assert!((sx - 57.0).abs() < 0.1 && (sy - 31.0).abs() < 0.1, "r: начало ({sx}, {sy})");
+        assert!((ex - 68.0).abs() < 0.1 && (ey - 23.5).abs() < 0.1, "r: конец ({ex}, {ey})");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! двойной клик — развернуть, ресайз за края (`BeginResize`). Тень и скруглённые углы Win11 — через DWM.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, CursorIcon, Id, PointerButton, Pos2, Rect, ResizeDirection, Sense, Stroke, Ui,
+    self, Color32, CornerRadius, CursorIcon, Id, PointerButton, Pos2, Rect, ResizeDirection, Sense, Stroke, Ui,
     ViewportCommand, pos2, vec2,
 };
 
@@ -204,11 +204,9 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
 
             let p = ui.painter();
             p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t::p().border));
-            // знак + «Murmur»; окно без фокуса — приглушённо
-            let mark = Rect::from_center_size(pos2(r.left() + 14.0 + 10.0, r.center().y), vec2(20.0, 20.0));
-            t::logo(p, mark, focused);
-            let name_color = if focused { t::p().text } else { t::p().text_muted };
-            p.text(pos2(mark.right() + 7.0, r.center().y), Align2::LEFT_CENTER, "Murmur", t::xbold(14.0), name_color);
+            // лого бренда (знак + «murmur»); окно без фокуса — приглушённо
+            const LOGO_H: f32 = 20.0;
+            t::paint_lockup(p, pos2(r.left() + 14.0, r.center().y - LOGO_H / 2.0), LOGO_H, focused);
 
             let forced = forced_hover();
             for (rect, kind) in [(minb, Btn::Min), (maxb, Btn::Max), (close, Btn::Close)] {

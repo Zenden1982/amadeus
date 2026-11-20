@@ -49,7 +49,7 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
         }
         area.show(ui, |ui| {
             ui.horizontal(|ui| {
-                t::wordmark(ui, 40.0, 24.0);
+                t::wordmark(ui, 36.0);
                 ui.add_space(16.0);
                 ui.label(RichText::new("витрина набора деталей").color(t::p().text_muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

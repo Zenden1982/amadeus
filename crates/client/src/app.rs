@@ -680,7 +680,7 @@ impl App {
         egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::symmetric(64, 56))).show(ui, |ui| {
             let r = ui.max_rect();
             let p = ui.painter().clone();
-            t::wordmark(ui, 44.0, 26.0);
+            t::wordmark(ui, 40.0);
             // кот и подпись — по центру левой части
             let mid = r.center().y;
             kit::mascot(&p, Rect::from_center_size(pos2(r.left() + 90.0, mid - 70.0), vec2(180.0, 180.0)), kit::MascotPose::Sitting);
