@@ -96,6 +96,8 @@ pub struct App {
     boot_error: Option<String>,
     login: LoginForm,
     me: Option<User>,
+    /// Серверы, раскладки, участники, голос (фаза 9.1).
+    model: crate::model::Model,
     channels: Vec<Channel>,
     channels_error: Option<String>,
     channels_at: Instant,
@@ -237,6 +239,7 @@ impl App {
             boot_error: None,
             login,
             me: None,
+            model: Default::default(),
             channels: Vec::new(),
             channels_error: None,
             channels_at: Instant::now(),
@@ -374,6 +377,7 @@ impl App {
     fn set_me(&mut self, user: User) {
         self.people.learn(people::public(&user));
         self.profile_name = user.display_name.clone().unwrap_or_default();
+        self.model.me = Some(user.id);
         self.me = Some(user);
     }
 
@@ -500,6 +504,7 @@ impl App {
         self.settings.save();
         self.set_api(self.api.with_token(None));
         self.me = None;
+        self.model = Default::default();
         self.channels.clear();
         self.settings_open = false;
         self.stop_mic_test();
@@ -2404,6 +2409,9 @@ impl eframe::App for App {
                 me.avatar = u.avatar.clone();
             }
             self.people.learn(u);
+        }
+        for e in self.chat.take_events() {
+            self.model.apply(&e);
         }
         self.people.poll();
         if self.screen == Screen::Main && self.chat.unauthorized() {

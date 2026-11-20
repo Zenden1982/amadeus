@@ -15,6 +15,7 @@ mod kit;
 mod legacy;
 mod metrics;
 mod mictest;
+mod model;
 mod people;
 mod picker;
 mod ptt;

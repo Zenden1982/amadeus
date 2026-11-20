@@ -128,6 +128,8 @@ pub struct Chat {
     paste_down: bool,
     /// Новые данные о людях из потока событий — забирает приложение (`take_users`).
     users_in: Vec<PublicUser>,
+    /// События серверов/каналов/голоса для модели (фаза 9.1); забирает App.
+    events_out: Vec<ServerEvent>,
     /// Высота нижней панели с полем ввода, измеренная в прошлом кадре (панель egui сама не сжимается).
     composer_h: f32,
     /// Отладка: шаги AMADEUS_CHAT_SCRIPT и время последнего шага.
@@ -158,6 +160,7 @@ impl Chat {
             notice: None,
             paste_down: false,
             users_in: Vec::new(),
+            events_out: Vec::new(),
             composer_h: 64.0,
             #[cfg(debug_assertions)]
             script: (
@@ -234,6 +237,7 @@ impl Chat {
         self.unauthorized = false;
         self.lightbox = None;
         self.notice = None;
+        self.events_out.clear();
     }
 
     /// Поток событий: запустить, если ещё не идёт (вызывается каждый кадр главного экрана).
@@ -253,6 +257,11 @@ impl Chat {
     /// Имена/аватары, пришедшие в потоке событий с прошлого вызова.
     pub fn take_users(&mut self) -> Vec<PublicUser> {
         std::mem::take(&mut self.users_in)
+    }
+
+    /// События для модели серверов (всё, кроме сообщений).
+    pub fn take_events(&mut self) -> Vec<ServerEvent> {
+        std::mem::take(&mut self.events_out)
     }
 
     pub fn lightbox_open(&self) -> bool {
@@ -407,6 +416,9 @@ impl Chat {
     }
 
     fn on_server(&mut self, e: ServerEvent) {
+        if !matches!(e, ServerEvent::MessageCreated { .. }) {
+            self.events_out.push(e.clone());
+        }
         match e {
             ServerEvent::Hello | ServerEvent::Resync => {
                 self.online = true;
@@ -427,7 +439,7 @@ impl Chat {
             }
             ServerEvent::UserUpdated { user } => self.users_in.push(user),
             ServerEvent::MemberUpserted { member, .. } => self.users_in.push(member.user),
-            // серверы, каналы, голос — забирает модель (фаза 9.1)
+            // серверы, каналы, голос — забирает модель (take_events)
             _ => {}
         }
     }

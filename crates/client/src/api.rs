@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use proto::{
-    Attachment, AuthResponse, Channel, CreateInviteRequest, ErrorBody, Invite, JoinResponse, LoginRequest, Message,
-    RegisterRequest, SendMessageRequest, User,
+    Attachment, AuthResponse, Ban, Category, Channel, ChannelLayout, CreateInviteRequest, ErrorBody, Invite,
+    InvitePreview, JoinResponse, LoginRequest, Member, Message, RegisterRequest, SendMessageRequest, Server, User,
+    VoiceRoster,
 };
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -278,6 +279,135 @@ impl Api {
         } else {
             Err(humanize(status, resp.json::<ErrorBody>().await.ok()))
         }
+    }
+}
+
+/// Фаза 9.1: серверы, роли, приглашения, каналы и категории.
+// Часть методов подключается экранами задач 15–18; пока не все используются.
+#[allow(dead_code)]
+impl Api {
+    async fn put_image<T: DeserializeOwned>(&self, path: &str, bytes: Vec<u8>) -> ApiResult<T> {
+        let req = self
+            .request(Method::PUT, path)
+            .timeout(UPLOAD_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes);
+        Self::decode(req.send().await.map_err(ApiError::network)?).await
+    }
+
+    pub async fn create_server(&self, name: &str) -> ApiResult<Server> {
+        self.call(Method::POST, "/servers", Some(&proto::CreateServerRequest { name: name.to_string() })).await
+    }
+
+    pub async fn update_server(&self, id: i64, name: &str) -> ApiResult<Server> {
+        let body = proto::UpdateServerRequest { name: Some(name.to_string()) };
+        self.call(Method::PATCH, &format!("/servers/{id}"), Some(&body)).await
+    }
+
+    pub async fn put_server_icon(&self, id: i64, bytes: Vec<u8>) -> ApiResult<Server> {
+        self.put_image(&format!("/servers/{id}/icon"), bytes).await
+    }
+
+    pub async fn delete_server_icon(&self, id: i64) -> ApiResult<Server> {
+        self.call::<(), _>(Method::DELETE, &format!("/servers/{id}/icon"), None).await
+    }
+
+    pub async fn delete_server(&self, id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/servers/{id}"), None).await
+    }
+
+    pub async fn transfer(&self, id: i64, user_id: i64) -> ApiResult<Server> {
+        self.call(Method::POST, &format!("/servers/{id}/transfer"), Some(&proto::TransferRequest { user_id })).await
+    }
+
+    pub async fn leave(&self, id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/servers/{id}/members/@me"), None).await
+    }
+
+    pub async fn set_role(&self, id: i64, user_id: i64, role_id: i64) -> ApiResult<Member> {
+        let body = proto::SetRoleRequest { role_id };
+        self.call(Method::PUT, &format!("/servers/{id}/members/{user_id}/role"), Some(&body)).await
+    }
+
+    pub async fn kick(&self, id: i64, user_id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/servers/{id}/members/{user_id}"), None).await
+    }
+
+    pub async fn disconnect(&self, id: i64, user_id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::POST, &format!("/servers/{id}/members/{user_id}/disconnect"), None).await
+    }
+
+    pub async fn ban(&self, id: i64, user_id: i64, reason: Option<String>) -> ApiResult<()> {
+        self.call(Method::POST, &format!("/servers/{id}/bans"), Some(&proto::BanRequest { user_id, reason })).await
+    }
+
+    pub async fn unban(&self, id: i64, user_id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/servers/{id}/bans/{user_id}"), None).await
+    }
+
+    pub async fn bans(&self, id: i64) -> ApiResult<Vec<Ban>> {
+        self.call::<(), _>(Method::GET, &format!("/servers/{id}/bans"), None).await
+    }
+
+    /// Куда зовёт приглашение (без входа).
+    pub async fn invite_preview(&self, code: &str) -> ApiResult<InvitePreview> {
+        self.call::<(), _>(Method::GET, &format!("/invites/{}", normalize_invite(code)), None).await
+    }
+
+    pub async fn join_invite(&self, code: &str) -> ApiResult<Server> {
+        self.call::<(), _>(Method::POST, &format!("/invites/{}/join", normalize_invite(code)), None).await
+    }
+
+    pub async fn revoke_invite(&self, code: &str) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/invites/{code}"), None).await
+    }
+
+    pub async fn server_invites(&self, id: i64) -> ApiResult<Vec<Invite>> {
+        self.call::<(), _>(Method::GET, &format!("/servers/{id}/invites"), None).await
+    }
+
+    pub async fn create_server_invite(&self, id: i64, uses: u32, expires_in_hours: u32) -> ApiResult<Invite> {
+        let body = CreateInviteRequest { uses: Some(uses), expires_in_hours: Some(expires_in_hours) };
+        self.call(Method::POST, &format!("/servers/{id}/invites"), Some(&body)).await
+    }
+
+    pub async fn layout(&self, server: i64) -> ApiResult<ChannelLayout> {
+        self.call::<(), _>(Method::GET, &format!("/servers/{server}/channels"), None).await
+    }
+
+    pub async fn create_channel(&self, server: i64, req: &proto::CreateChannelRequest) -> ApiResult<Channel> {
+        self.call(Method::POST, &format!("/servers/{server}/channels"), Some(req)).await
+    }
+
+    pub async fn update_channel(&self, id: i64, req: &proto::UpdateChannelRequest) -> ApiResult<Channel> {
+        self.call(Method::PATCH, &format!("/channels/{id}"), Some(req)).await
+    }
+
+    pub async fn delete_channel(&self, id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/channels/{id}"), None).await
+    }
+
+    pub async fn create_category(&self, server: i64, name: &str) -> ApiResult<Category> {
+        let body = proto::CategoryRequest { name: name.to_string() };
+        self.call(Method::POST, &format!("/servers/{server}/categories"), Some(&body)).await
+    }
+
+    pub async fn rename_category(&self, id: i64, name: &str) -> ApiResult<ChannelLayout> {
+        let body = proto::CategoryRequest { name: name.to_string() };
+        self.call(Method::PATCH, &format!("/categories/{id}"), Some(&body)).await
+    }
+
+    pub async fn delete_category(&self, id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/categories/{id}"), None).await
+    }
+
+    pub async fn put_layout(&self, server: i64, req: &proto::LayoutRequest) -> ApiResult<ChannelLayout> {
+        self.call(Method::PUT, &format!("/servers/{server}/layout"), Some(req)).await
+    }
+
+    /// Кто сейчас в голосовых каналах сервера.
+    pub async fn voice(&self, server: i64) -> ApiResult<Vec<VoiceRoster>> {
+        self.call::<(), _>(Method::GET, &format!("/servers/{server}/voice"), None).await
     }
 }
 
