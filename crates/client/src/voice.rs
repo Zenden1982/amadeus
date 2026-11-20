@@ -649,8 +649,11 @@ impl Engine {
             Err(e) => {
                 log::warn!("вход в канал {} (попытка {attempt}): {e:#}", ch.id);
                 self.drop_room();
-                let unauthorized = e.downcast_ref::<crate::api::ApiError>().is_some_and(|a| a.is_unauthorized());
-                if attempt == 0 || unauthorized {
+                // нет прав / канала больше нет — повторять бессмысленно
+                let fatal = e
+                    .downcast_ref::<crate::api::ApiError>()
+                    .is_some_and(|a| a.is_unauthorized() || a.code == "forbidden" || a.code == "not_found");
+                if attempt == 0 || fatal {
                     let msg = humanize_join_error(&e);
                     self.set(|s| {
                         s.conn = Conn::Failed(msg);
@@ -838,10 +841,12 @@ impl Engine {
                 if reason == livekit::DisconnectReason::ClientInitiated {
                     self.stop_stream().await;
                     self.set(|s| s.conn = Conn::Idle);
-                } else if reason == livekit::DisconnectReason::DuplicateIdentity {
+                } else if let Some(msg) = final_disconnect(reason) {
+                    // выгнали, забанили, «выкинули из голоса», канал удалён — назад не возвращаемся
                     self.stop_stream().await;
+                    self.rejoin = None;
                     self.set(|s| {
-                        s.conn = Conn::Failed("Вы зашли в канал с другого устройства.".into());
+                        s.conn = Conn::Failed(msg.into());
                         s.peers.clear();
                     });
                 } else {
@@ -1499,3 +1504,29 @@ impl Engine {
         self.set(|s| s.peers = peers);
     }
 }
+
+/// Отключение, после которого не переподключаемся (текст для человека); `None` — обрыв связи, вернуться в канал.
+fn final_disconnect(reason: livekit::DisconnectReason) -> Option<&'static str> {
+    use livekit::DisconnectReason as R;
+    match reason {
+        R::ParticipantRemoved => Some("Вас отключили от канала."),
+        R::RoomDeleted => Some("Канал закрыт."),
+        R::DuplicateIdentity => Some("Вы зашли в канал с другого устройства."),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removed_from_room_is_final() {
+        use livekit::DisconnectReason as R;
+        assert!(final_disconnect(R::ParticipantRemoved).is_some(), "кик/бан/«выкинуть из голоса» — не переподключаться");
+        assert!(final_disconnect(R::RoomDeleted).is_some(), "канал удалён — не переподключаться");
+        assert!(final_disconnect(R::DuplicateIdentity).is_some());
+        assert!(final_disconnect(R::SignalClose).is_none(), "обрыв связи — переподключаемся");
+    }
+}
+

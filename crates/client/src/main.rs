@@ -19,6 +19,7 @@ mod mictest;
 mod model;
 mod people;
 mod picker;
+mod server_settings;
 mod servers_ui;
 mod ptt;
 mod sounds;

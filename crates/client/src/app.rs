@@ -104,6 +104,7 @@ pub struct App {
     model: crate::model::Model,
     servers: ServersUi,
     channel_list: ChannelsUi,
+    server_settings: crate::server_settings::ServerSettings,
     /// Каналы активного сервера (из модели; в демо — свои).
     channels: Vec<Channel>,
     channels_at: Instant,
@@ -204,6 +205,7 @@ impl App {
         let people = People::new(rt.handle().clone(), ctx.clone(), api.clone());
         let servers = ServersUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let channel_list = ChannelsUi::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let server_settings = crate::server_settings::ServerSettings::new(rt.handle().clone(), ctx.clone(), api.clone());
         let updater = Updater::new(rt.handle().clone(), ctx.clone(), api.clone());
         let window = Window::from_cc(cc);
         desktop::mark_window(window);
@@ -249,6 +251,7 @@ impl App {
             model: Default::default(),
             servers,
             channel_list,
+            server_settings,
             channels: Vec::new(),
             channels_at: Instant::now(),
             settings_open: false,
@@ -445,6 +448,7 @@ impl App {
         self.people.set_api(api.clone());
         self.servers.set_api(api.clone());
         self.channel_list.set_api(api.clone());
+        self.server_settings.set_api(api.clone());
         self.model = Default::default();
         self.updater.set_api(api.clone());
         self.view = View::Voice;
@@ -836,7 +840,7 @@ impl App {
         };
         match text_channel {
             Some(ch) => {
-                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open();
+                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open();
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal, &self.people);
                 });
@@ -851,6 +855,7 @@ impl App {
         self.ui_volume_popup(ui, &vs);
         self.servers.dialogs(ui.ctx());
         self.channel_list.dialogs(ui.ctx());
+        self.server_settings.ui(ui.ctx(), &self.model, &self.people);
         if self.settings_open {
             self.ui_settings(ui, &vs);
         }
@@ -1019,8 +1024,7 @@ impl App {
                     .frame(Frame::new().inner_margin(Margin { left: 18, right: 18, top: 16, bottom: 12 }))
                     .show(ui, |ui| {
                         match self.servers.header(ui, &self.model) {
-                            // настройки сервера — задача 17
-                            Some(servers_ui::Action::OpenSettings(id)) => log::info!("настройки сервера {id}"),
+                            Some(servers_ui::Action::OpenSettings(id)) => self.server_settings.open(&self.model, id),
                             None => {}
                         }
                         let r = ui.max_rect();
@@ -1579,7 +1583,7 @@ impl App {
             self.set_fullscreen(&ctx, false);
         }
         let modal_open =
-            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.view != View::Voice;
+            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open() || self.view != View::Voice;
         let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 && !modal_open {
             if self.fullscreen {
@@ -2506,8 +2510,15 @@ impl eframe::App for App {
                 continue;
             }
             self.model.apply(&e);
+            // вступил на сервер не из этого окна (другое окно, повторный вход) — дочитать каналы и людей
+            if let proto::ServerEvent::ServerUpserted { server } = &e
+                && self.model.needs_load(server.id)
+            {
+                self.servers.reload_one(server.clone());
+            }
         }
         self.channel_list.poll(&mut self.model);
+        self.server_settings.poll();
         let out = self.servers.poll(&mut self.model, &mut self.people);
         if out.unauthorized {
             self.logout();

@@ -274,8 +274,6 @@ impl Api {
 }
 
 /// Фаза 9.1: серверы, роли, приглашения, каналы и категории.
-// Часть методов подключается экранами задач 15–18; пока не все используются.
-#[allow(dead_code)]
 impl Api {
     async fn put_image<T: DeserializeOwned>(&self, path: &str, bytes: Vec<u8>) -> ApiResult<T> {
         let req = self

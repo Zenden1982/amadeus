@@ -1,7 +1,5 @@
 //! Чистая модель серверов (фаза 9.1): мои серверы, раскладка каналов, участники, кто в голосе, люди.
 //! Всё меняется только через `apply` (события `/events`) и `set_*` (ответы API) — тестируется без UI.
-// Экраны задач 15–17 подключают остальные методы; до тех пор часть не используется.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -57,6 +55,11 @@ impl Model {
         for r in rosters {
             self.put_roster(r);
         }
+    }
+
+    /// Сервер есть, а раскладки ещё нет (вступил по событию) — надо загрузить.
+    pub fn needs_load(&self, id: i64) -> bool {
+        self.has_server(id) && !self.layouts.contains_key(&id)
     }
 
     pub fn server(&self, id: i64) -> Option<&Server> {
@@ -315,6 +318,16 @@ mod tests {
         // Моя роль поменялась событием участника.
         m.apply(&ServerEvent::MemberUpserted { server_id: 1, member: Member { user: user(5, "me"), role_id: 13 } });
         assert_eq!(m.my_perms(1), perm::INVITE);
+    }
+
+    #[test]
+    fn upserted_server_without_layout_needs_load() {
+        let mut m = Model::default();
+        m.apply(&ServerEvent::ServerUpserted { server: server(3, 13) });
+        assert!(m.needs_load(3), "вступил по событию — каналов ещё нет");
+        m.set_layout(3, ChannelLayout { categories: vec![], channels: vec![] });
+        assert!(!m.needs_load(3));
+        assert!(!m.needs_load(99), "чужой сервер не грузим");
     }
 
     #[test]
