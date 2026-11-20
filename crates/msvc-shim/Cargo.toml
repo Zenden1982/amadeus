@@ -3,6 +3,7 @@ name = "msvc-shim"
 description = "Совместимость предкомпилированного libwebrtc со старым MSVC STL (удалить после VS 17.14+)"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lib]

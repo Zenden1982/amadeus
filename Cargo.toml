@@ -5,6 +5,7 @@ members = ["crates/proto", "crates/backend", "crates/client", "crates/capture-wi
 [workspace.package]
 edition = "2024"
 version = "0.3.0"
+license = "AGPL-3.0-or-later"
 publish = false
 
 # Патч WebRTC: громкость удалённого аудиотрека (AudioTrackInterface::SetVolume). См. vendor/PATCHES.md.
