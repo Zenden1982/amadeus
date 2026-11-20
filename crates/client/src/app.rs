@@ -11,9 +11,9 @@ use eframe::egui::{
     StrokeKind, TextEdit, Ui, pos2, vec2,
 };
 use egui_phosphor::regular as ph;
-use proto::{AuthResponse, Channel, ChannelKind, Invite, User};
+use proto::{AuthResponse, Channel, ChannelKind, InvitePreview, User};
 
-use crate::api::{self, Api, ApiError, ApiResult};
+use crate::api::{self, Api, ApiResult};
 use crate::chat::Chat;
 use crate::config::{NoiseMode, Settings, ThemePref};
 use crate::desktop::{self, Window};
@@ -23,6 +23,7 @@ use crate::mictest::{self, MicTest};
 use crate::people::{self, People};
 use crate::picker::{self, Picker};
 use crate::ptt::{self, Ptt};
+use crate::servers_ui::{self, ServersUi};
 use crate::kit::{self, DockStyle};
 use crate::theme as t;
 use crate::video::VideoHub;
@@ -36,8 +37,8 @@ const CHANNELS_REFRESH: Duration = Duration::from_secs(60);
 enum Msg {
     Me(ApiResult<User>),
     Auth(ApiResult<AuthResponse>),
-    Channels(ApiResult<Vec<Channel>>),
-    Invite(ApiResult<Invite>),
+    /// Превью приглашения на экране входа: (код, куда зовут).
+    Preview(String, Result<InvitePreview, String>),
     /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
     Profile(Result<Option<User>, String>),
     /// Установщик Murmur скачан (переход со старой установки).
@@ -70,6 +71,8 @@ struct LoginForm {
     name: String,
     password: String,
     invite: [String; 3],
+    /// Куда зовёт введённый код: (код, ответ).
+    preview: Option<(String, Result<InvitePreview, String>)>,
     error: Option<String>,
     busy: bool,
     server_edit: Option<String>,
@@ -98,16 +101,15 @@ pub struct App {
     me: Option<User>,
     /// Серверы, раскладки, участники, голос (фаза 9.1).
     model: crate::model::Model,
+    servers: ServersUi,
+    /// Каналы активного сервера (из модели; в демо — свои).
     channels: Vec<Channel>,
-    channels_error: Option<String>,
     channels_at: Instant,
     settings_open: bool,
     /// Отладочный оверлей метрик (F3).
     metrics_open: bool,
     metrics_init: bool,
     popup: Option<VolumePopup>,
-    invite: Option<Result<Invite, String>>,
-    invite_busy: bool,
     mic_test: Option<MicTest>,
     /// Параметры, с которыми запущена проверка: (микрофон, вывод, шумодав, agc, слышать себя).
     mic_test_key: Option<MicTestKey>,
@@ -198,6 +200,7 @@ impl App {
         let video = VideoHub::new(&ctx);
         let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
         let people = People::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let servers = ServersUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let updater = Updater::new(rt.handle().clone(), ctx.clone(), api.clone());
         let window = Window::from_cc(cc);
         desktop::mark_window(window);
@@ -221,6 +224,7 @@ impl App {
             name: settings.last_name.clone(),
             password: String::new(),
             invite: Default::default(),
+            preview: None,
             error: None,
             busy: false,
             server_edit: None,
@@ -240,15 +244,13 @@ impl App {
             login,
             me: None,
             model: Default::default(),
+            servers,
             channels: Vec::new(),
-            channels_error: None,
             channels_at: Instant::now(),
             settings_open: false,
             metrics_open: false,
             metrics_init: false,
             popup: None,
-            invite: None,
-            invite_busy: false,
             mic_test: None,
             mic_test_key: None,
             mic_test_error: None,
@@ -317,6 +319,14 @@ impl App {
             position,
             user_limit: None,
         };
+        self.model.set_servers(vec![proto::Server {
+            id: 1,
+            name: "Лаборатория".into(),
+            icon: None,
+            owner_id: 1,
+            roles: vec![proto::Role { id: 1, name: "Владелец".into(), position: 3, permissions: proto::perm::ALL }],
+            my_role_id: 1,
+        }]);
         self.channels = vec![
             ch(3, "общий", ChannelKind::Text, 0),
             ch(4, "учёба", ChannelKind::Text, 1),
@@ -367,11 +377,55 @@ impl App {
         self.spawn(async move { api.me().await }, Msg::Me);
     }
 
+    /// Перечитать серверы, каналы, участников и голос.
     fn fetch_channels(&mut self) {
         self.channels_at = Instant::now();
-        let api = self.api.clone();
-        self.spawn(async move { api.channels().await }, Msg::Channels);
-        self.people.reload();
+        self.servers.reload();
+    }
+
+    /// Первая загрузка серверов: выбрать сохранённый, отладочные автодействия.
+    fn on_servers_loaded(&mut self) {
+        if let Some(id) = self.settings.last_server {
+            self.model.set_active(id);
+        }
+        self.sync_channels();
+        // Отладка: AMADEUS_AUTOJOIN=<id канала> — сразу зайти (только debug-сборка).
+        #[cfg(debug_assertions)]
+        if let Some(id) = std::env::var("AMADEUS_AUTOJOIN").ok().and_then(|v| v.parse::<i64>().ok()) {
+            let all = self.model.servers.iter().flat_map(|s| self.model.channels(s.id)).collect::<Vec<_>>();
+            if let Some(ch) = all.into_iter().find(|c| c.id == id) {
+                self.model.set_active(ch.server_id);
+                self.sync_channels();
+                self.voice.send(Cmd::Join(ch));
+            }
+        }
+        // Отладка: AMADEUS_OPEN_TEXT=<id канала> — сразу открыть текстовый канал.
+        #[cfg(debug_assertions)]
+        if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
+            self.view = View::Text(id);
+        }
+    }
+
+    /// Каналы активного сервера — из модели; открытый текстовый канал пропал — к сцене.
+    fn sync_channels(&mut self) {
+        if self.demo {
+            return;
+        }
+        self.channels = self.model.active.map(|id| self.model.channels(id)).unwrap_or_default();
+        if let View::Text(id) = self.view
+            && !self.channels.iter().any(|c| c.id == id && c.kind == ChannelKind::Text)
+        {
+            self.view = View::Voice;
+        }
+    }
+
+    fn select_server(&mut self, id: i64) {
+        self.model.set_active(id);
+        if self.settings.last_server != Some(id) {
+            self.settings.last_server = Some(id);
+            self.settings.save();
+        }
+        self.sync_channels();
     }
 
     fn set_me(&mut self, user: User) {
@@ -385,6 +439,8 @@ impl App {
         self.api = api.clone();
         self.chat.set_api(api.clone());
         self.people.set_api(api.clone());
+        self.servers.set_api(api.clone());
+        self.model = Default::default();
         self.updater.set_api(api.clone());
         self.view = View::Voice;
         self.voice.send(Cmd::SetApi(api));
@@ -430,6 +486,7 @@ impl App {
                             self.set_me(auth.user);
                             self.login.password.clear();
                             self.login.invite = Default::default();
+                            self.login.preview = None;
                             self.login.error = None;
                             self.screen = Screen::Main;
                             self.fetch_channels();
@@ -437,40 +494,8 @@ impl App {
                         Err(e) => self.login.error = Some(e.message),
                     }
                 }
-                Msg::Channels(Ok(list)) => {
-                    // Отладка: AMADEUS_AUTOJOIN=<id канала> — сразу зайти (только debug-сборка).
-                    #[cfg(debug_assertions)]
-                    if self.channels.is_empty()
-                        && let Some(id) = std::env::var("AMADEUS_AUTOJOIN").ok().and_then(|v| v.parse::<i64>().ok())
-                        && let Some(ch) = list.iter().find(|c| c.id == id)
-                    {
-                        self.voice.send(Cmd::Join(ch.clone()));
-                    }
-                    // Отладка: AMADEUS_OPEN_TEXT=<id канала> — сразу открыть текстовый канал.
-                    #[cfg(debug_assertions)]
-                    if self.channels.is_empty()
-                        && let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok())
-                    {
-                        self.view = View::Text(id);
-                    }
-                    if let View::Text(id) = self.view
-                        && !list.iter().any(|c| c.id == id && c.kind == ChannelKind::Text)
-                    {
-                        self.view = View::Voice;
-                    }
-                    self.channels = list;
-                    self.channels_error = None;
-                }
-                Msg::Channels(Err(e)) => {
-                    if e.is_unauthorized() {
-                        self.logout();
-                    } else {
-                        self.channels_error = Some(e.message);
-                    }
-                }
-                Msg::Invite(res) => {
-                    self.invite_busy = false;
-                    self.invite = Some(res.map_err(|e: ApiError| e.message));
+                Msg::Preview(code, res) => {
+                    self.login.preview = Some((code, res));
                 }
                 Msg::Legacy(res) => {
                     self.legacy_busy = false;
@@ -509,7 +534,6 @@ impl App {
         self.settings_open = false;
         self.stop_mic_test();
         self.popup = None;
-        self.invite = None;
         self.login.tab = Tab::Login;
         self.login.name = self.settings.last_name.clone();
         self.screen = Screen::Login;
@@ -681,7 +705,25 @@ impl App {
         if self.login.tab == Tab::Invite {
             label(ui, "Код приглашения");
             self.invite_input(ui, w);
-            ui.label(RichText::new("Регистр и дефисы не важны — можно вставить целиком.").size(12.5).color(t::p().text_muted));
+            let code = api::normalize_invite(&self.login.invite.concat());
+            if code.len() == 12 && self.login.preview.as_ref().is_none_or(|(c, _)| *c != code) {
+                self.login.preview = Some((code.clone(), Err(String::new())));
+                let api = self.api.with_token(None);
+                let c = code.clone();
+                self.spawn(async move { api.invite_preview(&c).await.map_err(|e| e.message) }, move |r| Msg::Preview(code, r));
+            }
+            let code = api::normalize_invite(&self.login.invite.concat());
+            match &self.login.preview {
+                Some((c, Ok(p))) if *c == code => {
+                    ui.label(RichText::new(format!("Вас пригласили на «{}»", p.server_name)).font(t::semibold(14.0)).color(t::p().text));
+                }
+                Some((c, Err(e))) if *c == code && !e.is_empty() => {
+                    ui.label(RichText::new(e).size(12.5).color(t::p().danger_text));
+                }
+                _ => {
+                    ui.label(RichText::new("Регистр и дефисы не важны — можно вставить целиком.").size(12.5).color(t::p().text_muted));
+                }
+            }
             ui.add_space(12.0);
         }
         label(ui, "Ник");
@@ -789,7 +831,7 @@ impl App {
         };
         match text_channel {
             Some(ch) => {
-                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open;
+                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open();
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal, &self.people);
                 });
@@ -802,6 +844,7 @@ impl App {
         }
         self.ui_banner(ui, &vs);
         self.ui_volume_popup(ui, &vs);
+        self.servers.dialogs(ui.ctx());
         if self.settings_open {
             self.ui_settings(ui, &vs);
         }
@@ -944,6 +987,18 @@ impl App {
     }
 
     fn ui_sidebar(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        egui::Panel::left("servers")
+            .exact_size(servers_ui::COLUMN_W)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::new().fill(t::p().bg))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+                    if let Some(id) = self.servers.column(ui, &self.model, &self.people) {
+                        self.select_server(id);
+                    }
+                });
+            });
         egui::Panel::left("side")
             .exact_size(260.0)
             .resizable(false)
@@ -957,8 +1012,11 @@ impl App {
                     .show_separator_line(false)
                     .frame(Frame::new().inner_margin(Margin { left: 18, right: 18, top: 16, bottom: 12 }))
                     .show(ui, |ui| {
-                        // фаза 9: здесь будет название сервера
-                        ui.label(RichText::new("Murmur").font(t::xbold(18.0)).color(t::p().text));
+                        match self.servers.header(ui, &self.model) {
+                            // настройки сервера — задача 17
+                            Some(servers_ui::Action::OpenSettings(id)) => log::info!("настройки сервера {id}"),
+                            None => {}
+                        }
                         let r = ui.max_rect();
                         ui.painter().hline(full.x_range(), r.bottom() + 12.0, Stroke::new(1.0, t::p().border));
                     });
@@ -985,7 +1043,14 @@ impl App {
         group_label(ui, "Голосовые каналы");
         let voice: Vec<Channel> = self.channels.iter().filter(|c| c.kind == ChannelKind::Voice).cloned().collect();
         if voice.is_empty() {
-            let text = self.channels_error.clone().unwrap_or_else(|| "Загрузка…".into());
+            let text = match (&self.servers.load_error, self.model.active) {
+                (Some(e), _) => e.clone(),
+                (None, None) if !self.model.servers.is_empty() || self.channels_at.elapsed() > Duration::from_secs(3) => {
+                    "Нет серверов — нажмите «+» слева".into()
+                }
+                (None, Some(_)) => "Нет голосовых каналов".into(),
+                _ => "Загрузка…".into(),
+            };
             ui.horizontal(|ui| {
                 ui.add_space(18.0);
                 ui.label(RichText::new(text).size(13.0).color(t::p().text_muted));
@@ -1464,7 +1529,7 @@ impl App {
             self.set_fullscreen(&ctx, false);
         }
         let modal_open =
-            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.view != View::Voice;
+            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.view != View::Voice;
         let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 && !modal_open {
             if self.fullscreen {
@@ -2031,7 +2096,6 @@ impl App {
 
     fn open_settings(&mut self) {
         self.settings_open = true;
-        self.invite = None;
         self.voice.send(Cmd::RefreshDevices);
     }
 
@@ -2277,33 +2341,6 @@ impl App {
                             }
                         });
                     });
-                    if me.as_ref().is_some_and(|u| u.is_admin) {
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            let busy = self.invite_busy;
-                            if kit::button_ex(ui, kit::ButtonKind::Primary, "Создать приглашение", Some(egui_phosphor::fill::TICKET), !busy).clicked() {
-                                self.invite_busy = true;
-                                let api = self.api.clone();
-                                self.spawn(async move { api.create_invite().await }, Msg::Invite);
-                            }
-                            match &self.invite {
-                                Some(Ok(inv)) => {
-                                    let code = inv.code.clone();
-                                    let (rect, _) = ui.allocate_exact_size(vec2(230.0, 34.0), Sense::hover());
-                                    ui.painter().text(rect.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &code, t::xbold(22.0), t::p().accent_text);
-                                    if kit::icon_button(ui, ph::COPY, kit::IconState::Normal, "Скопировать").clicked() {
-                                        ui.ctx().copy_text(code);
-                                    }
-                                }
-                                Some(Err(e)) => {
-                                    ui.label(RichText::new(e).size(13.0).color(t::p().danger_text));
-                                }
-                                None => {
-                                    ui.label(RichText::new("1 вход, 7 дней").size(13.0).color(t::p().text_muted));
-                                }
-                            }
-                        });
-                    }
                 });
                 ui.add_space(20.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -2411,8 +2448,26 @@ impl eframe::App for App {
             self.people.learn(u);
         }
         for e in self.chat.take_events() {
+            if matches!(e, proto::ServerEvent::Hello | proto::ServerEvent::Resync) {
+                // поток (пере)открылся — дочитать, что могли пропустить
+                if self.screen == Screen::Main && !self.demo {
+                    self.fetch_channels();
+                }
+                continue;
+            }
             self.model.apply(&e);
         }
+        let out = self.servers.poll(&mut self.model, &mut self.people);
+        if out.unauthorized {
+            self.logout();
+        }
+        if out.first_load {
+            self.on_servers_loaded();
+        }
+        if let Some(id) = out.select {
+            self.select_server(id);
+        }
+        self.sync_channels();
         self.people.poll();
         if self.screen == Screen::Main && self.chat.unauthorized() {
             self.logout();

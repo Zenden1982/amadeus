@@ -22,7 +22,6 @@ enum Tex {
 }
 
 enum Ev {
-    Users(Vec<PublicUser>),
     Image { key: String, res: Result<ColorImage, String> },
 }
 
@@ -60,32 +59,6 @@ impl People {
         self.tex.borrow_mut().clear();
     }
 
-    /// Загрузить участников всех моих серверов (имена и аватары тех, кто в голосе, но ещё не писал).
-    pub fn reload(&self) {
-        if !self.api.has_token() {
-            return;
-        }
-        let (api, tx, ctx) = (self.api.clone(), self.tx.clone(), self.ctx.clone());
-        self.rt.spawn(async move {
-            let servers = match api.servers().await {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("people: servers: {e}");
-                    return;
-                }
-            };
-            let mut users = Vec::new();
-            for s in servers {
-                match api.members(s.id).await {
-                    Ok(m) => users.extend(m.into_iter().map(|m| m.user)),
-                    Err(e) => log::warn!("people: members {}: {e}", s.id),
-                }
-            }
-            let _ = tx.send(Ev::Users(users));
-            ctx.request_repaint();
-        });
-    }
-
     pub fn learn(&mut self, u: PublicUser) {
         self.users.insert(u.id, u);
     }
@@ -93,11 +66,6 @@ impl People {
     pub fn poll(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Ev::Users(list) => {
-                    for u in list {
-                        self.learn(u);
-                    }
-                }
                 Ev::Image { key, res } => {
                     let tex = match res {
                         Ok(ci) => Tex::Ready(self.ctx.load_texture(format!("avatar-{key}"), ci, TextureOptions::LINEAR)),

@@ -101,6 +101,8 @@ pub struct Settings {
     pub autostart: bool,
     /// Тема оформления.
     pub theme: ThemePref,
+    /// Последний открытый сервер.
+    pub last_server: Option<i64>,
 }
 
 impl Default for Settings {
@@ -125,6 +127,7 @@ impl Default for Settings {
             close_to_tray: true,
             autostart: true,
             theme: ThemePref::default(),
+            last_server: None,
         }
     }
 }

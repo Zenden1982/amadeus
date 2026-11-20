@@ -178,19 +178,10 @@ impl Api {
         self.call::<(), _>(Method::GET, "/me", None).await
     }
 
-    pub async fn channels(&self) -> ApiResult<Vec<Channel>> {
-        self.call::<(), _>(Method::GET, "/channels", None).await
-    }
-
     pub async fn join(&self, channel_id: i64) -> ApiResult<JoinResponse> {
         self.call::<(), _>(Method::POST, &format!("/channels/{channel_id}/join"), None).await
     }
 
-    pub async fn create_invite(&self) -> ApiResult<Invite> {
-        self.call(Method::POST, "/invites", Some(&CreateInviteRequest::default())).await
-    }
-
-    /// Страница истории (по возрастанию id): последние, старше `before` или новее `after`.
     pub async fn messages(&self, channel_id: i64, before: Option<i64>, after: Option<i64>) -> ApiResult<Vec<Message>> {
         let mut path = format!("/channels/{channel_id}/messages?limit={}", proto::limits::HISTORY_PAGE);
         if let Some(b) = before {
