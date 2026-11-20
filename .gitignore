@@ -7,3 +7,4 @@ deploy/generated/
 .superpowers/
 dist/
 .superpowers/brainstorm/
+data/
