@@ -35,6 +35,8 @@ const MF_E_TRANSFORM_STREAM_CHANGE: i32 = 0xC00D6D61u32 as i32;
 const MF_VERSION: u32 = 0x0002_0070;
 const RING: usize = 4;
 const REPEAT_EVERY: Duration = Duration::from_millis(1000);
+/// Сколько размер окна должен не меняться, прежде чем пересоздавать энкодер (перетаскивание края — десятки размеров).
+const RESIZE_SETTLE: Duration = Duration::from_millis(600);
 const POLL: Duration = Duration::from_millis(50);
 /// Нижняя граница битрейта по запросам GCC (ниже картинка разваливается).
 const MIN_BITRATE: u32 = 300_000;
@@ -108,7 +110,6 @@ struct Converter {
     device: ID3D11Device,
     vdev: ID3D11VideoDevice,
     vctx: ID3D11VideoContext,
-    ctx1: ID3D11DeviceContext1,
     fps: u32,
     out_w: u32,
     out_h: u32,
@@ -116,18 +117,18 @@ struct Converter {
     vp: Option<(ID3D11VideoProcessorEnumerator, ID3D11VideoProcessor)>,
     outputs: Vec<(ID3D11Texture2D, ID3D11VideoProcessorOutputView)>,
     next: usize,
+    /// Однотонная BGRA-текстура для заглушки (создаётся по требованию).
+    solid: Option<ID3D11Texture2D>,
 }
 
 impl Converter {
     fn new(device: &ID3D11Device, ctx: &ID3D11DeviceContext, out_w: u32, out_h: u32, fps: u32) -> R<Converter> {
         let vdev: ID3D11VideoDevice = device.cast().map_err(e("ID3D11VideoDevice"))?;
         let vctx: ID3D11VideoContext = ctx.cast().map_err(e("ID3D11VideoContext"))?;
-        let ctx1: ID3D11DeviceContext1 = ctx.cast().map_err(e("ID3D11DeviceContext1"))?;
         let mut c = Converter {
             device: device.clone(),
             vdev,
             vctx,
-            ctx1,
             fps,
             out_w,
             out_h,
@@ -135,6 +136,7 @@ impl Converter {
             vp: None,
             outputs: Vec::new(),
             next: 0,
+            solid: None,
         };
         // Процессор под выходной размер (вход уточним по первому кадру) — нужен, чтобы создать output views.
         c.make_vp(out_w, out_h)?;
@@ -242,14 +244,31 @@ impl Converter {
         Ok(tex)
     }
 
-    /// Заглушка (цвет фона клиента) — пока окно свёрнуто.
-    fn placeholder(&mut self) -> ID3D11Texture2D {
-        let (tex, view) = self.outputs[self.next].clone();
-        self.next = (self.next + 1) % self.outputs.len();
-        if let Ok(v) = view.cast::<ID3D11View>() {
-            unsafe { self.ctx1.ClearView(&v, &[24.0 / 255.0, 126.0 / 255.0, 131.0 / 255.0, 1.0], None) };
+    /// Заглушка (тёмный кадр) — окно свёрнуто ещё до первого кадра. Через тот же видеопроцессор, что и живые кадры:
+    /// ClearView по NV12-виду красит каналы как есть, и зритель видел ярко-зелёный кадр.
+    fn placeholder(&mut self) -> R<ID3D11Texture2D> {
+        const S: u32 = 64;
+        if self.solid.is_none() {
+            let px = vec![0xFF_16_12_0Fu32; (S * S) as usize]; // BGRA тёмный фон
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: S,
+                Height: S,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let init = D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr().cast(), SysMemPitch: S * 4, SysMemSlicePitch: 0 };
+            let mut tex = None;
+            unsafe { self.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex)) }.map_err(e("текстура заглушки"))?;
+            self.solid = tex;
         }
-        tex
+        let solid = self.solid.clone().ok_or("нет текстуры заглушки")?;
+        self.convert(&solid, S, S)
     }
 }
 
@@ -659,6 +678,9 @@ pub fn has_nal(data: &[u8], ty: u8) -> bool {
 
 // ------------------------------------------------------------------ захват
 
+/// Желаемый размер энкодера: (размер, с какого момента, уже сообщили).
+type WantSize = ((u32, u32), Instant, bool);
+
 struct Shared {
     stop: AtomicBool,
     closed: AtomicBool,
@@ -670,6 +692,9 @@ struct Shared {
     minimized: AtomicBool,
     min_interval: Duration,
     frames: AtomicU32,
+    /// Размер энкодера и желаемый размер по живым кадрам: (размер, с какого момента, уже сообщили).
+    enc_size: (u32, u32),
+    want_size: Mutex<Option<WantSize>>,
 }
 
 pub struct HwCapture {
@@ -723,6 +748,8 @@ impl HwCapture {
             minimized: AtomicBool::new(false),
             min_interval: Duration::from_micros(1_000_000 / fps as u64 * 85 / 100),
             frames: AtomicU32::new(0),
+            enc_size: (w, h),
+            want_size: Mutex::new(None),
         });
         let events = {
             let (enc, sink) = (enc.clone(), sink.clone());
@@ -761,6 +788,10 @@ impl HwCapture {
                     return Ok(());
                 }
                 let cs = frame.ContentSize()?;
+                // Свёрнутое окно: WGC шлёт пустые/крошечные кадры — не кодируем их (поток повторяет последний живой кадр).
+                if cs.Width < 16 || cs.Height < 16 || (source.is_window() && source.is_minimized()) {
+                    return Ok(());
+                }
                 {
                     let mut ls = last_size.lock().unwrap();
                     if (cs.Width, cs.Height) != *ls {
@@ -780,7 +811,25 @@ impl HwCapture {
                 let surface = frame.Surface()?;
                 let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
                 let tex: ID3D11Texture2D = unsafe { access.GetInterface()? };
-                let (w, h) = ((cs.Width.max(2) as u32) & !1, (cs.Height.max(2) as u32) & !1);
+                // После Recreate ещё приходят кадры из старого пула: текстура меньше ContentSize. Прямоугольник
+                // источника больше текстуры — VideoProcessorBlt E_INVALIDARG, а следом падение в d3d11.dll.
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { tex.GetDesc(&mut desc) };
+                let w = (cs.Width as u32).min(desc.Width) & !1;
+                let h = (cs.Height as u32).min(desc.Height) & !1;
+                if w < 16 || h < 16 {
+                    return Ok(());
+                }
+                {
+                    // Окно изменило размер: запоминаем, насос сообщит, когда размер устоится (не на каждом шаге перетаскивания).
+                    let t = target_size(w, h, &cfg);
+                    let mut want = shared.want_size.lock().unwrap();
+                    if t == shared.enc_size {
+                        *want = None;
+                    } else if want.as_ref().is_none_or(|(s, _, _)| *s != t) {
+                        *want = Some((t, Instant::now(), false));
+                    }
+                }
                 let nv12 = match shared.conv.lock().unwrap().0.convert(&tex, w, h) {
                     Ok(t) => t,
                     Err(err) => {
@@ -879,6 +928,14 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
                 last_repeat = Instant::now() - REPEAT_EVERY;
             }
         }
+        if let Some((size, since, sent)) = shared.want_size.lock().unwrap().as_mut()
+            && !*sent
+            && since.elapsed() >= RESIZE_SETTLE
+        {
+            *sent = true;
+            log::info!("захват: размер {}×{} → {}×{} — пересоздать энкодер", shared.enc_size.0, shared.enc_size.1, size.0, size.1);
+            shared.sink.event(Event::SizeChanged { width: size.0, height: size.1 });
+        }
         let minimized = shared.minimized.load(Ordering::Relaxed);
         let idle = shared.last.lock().unwrap().1.elapsed();
         let key_wanted = shared.sink.take_keyframe_request();
@@ -887,10 +944,12 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
         }
         if (idle >= REPEAT_EVERY || minimized) && (last_repeat.elapsed() >= REPEAT_EVERY || key_wanted) {
             last_repeat = Instant::now();
-            let tex = if minimized {
-                Some(shared.conv.lock().unwrap().0.placeholder())
-            } else {
-                shared.last.lock().unwrap().0.as_ref().map(|t| t.0.clone())
+            // Свёрнутое окно: зритель видит последний живой кадр (заглушка — только если кадров ещё не было).
+            let last = shared.last.lock().unwrap().0.as_ref().map(|t| t.0.clone());
+            let tex = match last {
+                Some(t) => Some(t),
+                None if minimized => shared.conv.lock().unwrap().0.placeholder().ok(),
+                None => None,
             };
             if let Some(t) = tex {
                 shared.enc.push(t, now_us(), shared.sink.as_ref());

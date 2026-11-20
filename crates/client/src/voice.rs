@@ -305,6 +305,8 @@ struct Streaming {
     preset: Preset,
     /// Аппаратный путь (pre-encoded H.264).
     hw: bool,
+    /// Что транслируем (для пересоздания захвата при смене размера окна).
+    source_id: SourceId,
     publication: Option<LocalTrackPublication>,
     /// Звук окна/системы (фаза 5); None — не передаётся.
     audio: Option<StreamSound>,
@@ -941,6 +943,7 @@ impl Engine {
                 match r {
                     Ok(c) => {
                         st.capture = Some(c);
+                        st.source_id = source;
                         self.stream = Some(st);
                         log::info!("трансляция: источник сменён на {source:?}");
                         self.set(|s| {
@@ -991,6 +994,7 @@ impl Engine {
             source: started.video,
             preset,
             hw: started.hw,
+            source_id: source,
             publication: Some(publication),
             audio: None,
         });
@@ -1086,6 +1090,38 @@ impl Engine {
         self.refresh_peers(false);
     }
 
+    /// Аппаратный энкодер — фиксированного размера: окно устойчиво изменилось (развернули, растянули) →
+    /// пересоздаём захват под новый размер в тот же опубликованный трек (зрители не переподключаются).
+    async fn resize_hw_capture(&mut self, width: u32, height: u32) {
+        let Some(st) = self.stream.as_mut() else { return };
+        if !st.hw {
+            return;
+        }
+        let (source, preset) = (st.source_id, st.preset);
+        if let Some(c) = st.capture.take() {
+            tokio::task::block_in_place(|| c.stop());
+        }
+        self.generation += 1;
+        self.last_video_bytes = None;
+        let Some(st) = self.stream.as_mut() else { return };
+        match tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, true, self.generation, &self.cap_tx)) {
+            Ok(c) => {
+                st.capture = Some(c);
+                log::info!("трансляция: энкодер пересоздан под {width}×{height}");
+                self.set(|s| {
+                    if let Some(i) = &mut s.stream {
+                        i.size = Some((width, height));
+                    }
+                });
+            }
+            Err(e) => {
+                log::warn!("трансляция: пересоздание энкодера под {width}×{height}: {e}");
+                self.stop_stream().await;
+                self.set(|s| s.stream_notice = Some(format!("Трансляция остановлена: {e}")));
+            }
+        }
+    }
+
     async fn on_capture_event(&mut self, ev: CaptureEvent) {
         if ev.generation != self.generation || self.stream.is_none() {
             return;
@@ -1096,6 +1132,7 @@ impl Engine {
                     i.size = Some((width, height));
                 }
             }),
+            CapEvent::SizeChanged { width, height } => self.resize_hw_capture(width, height).await,
             CapEvent::Minimized(m) => self.set(|s| {
                 if let Some(i) = &mut s.stream {
                     i.minimized = m;

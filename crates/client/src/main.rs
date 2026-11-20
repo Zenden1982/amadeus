@@ -5,6 +5,7 @@ mod api;
 mod app;
 mod chat;
 mod config;
+mod crash;
 mod denoise;
 mod desktop;
 mod frame;
@@ -45,6 +46,7 @@ fn main() -> eframe::Result {
         }
     }
     logger.init();
+    crash::install();
     let args = desktop::Args::parse(std::env::args().skip(1));
     // После обновления: дождаться, пока старая копия отпустит «единственный экземпляр».
     if let Some(pid) = args.after_update {
