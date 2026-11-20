@@ -1039,7 +1039,7 @@ impl App {
             .exact_size(servers_ui::COLUMN_W)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t::p().bg))
+            .frame(Frame::new().fill(t::p().rail))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                     if let Some(id) = self.servers.column(ui, &self.model, &self.people) {
@@ -1482,7 +1482,7 @@ impl App {
             let bw = if small { 116.0 } else { 150.0 };
             let by = if tiny { rect.center().y - 4.0 } else { ac.y + ar + if small { 22.0 } else { 52.0 } };
             let br = Rect::from_center_size(pos2(rect.center().x, by), vec2(bw, if small { 30.0 } else { 38.0 }));
-            painter.rect_filled(br, CornerRadius::same(255), if hovered { t::p().accent_hover } else { t::p().accent });
+            painter.rect_filled(br, CornerRadius::same(255), if hovered { t::p().accent_strong_hover } else { t::p().accent_strong });
             painter.text(br.center(), Align2::CENTER_CENTER, format!("{}  Смотреть", ph::PLAY), t::bold(if small { 13.0 } else { 14.5 }), t::p().on_accent);
         }
 

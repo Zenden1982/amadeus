@@ -20,8 +20,8 @@ pub enum ButtonKind {
 fn colors(kind: ButtonKind, hover: f32, enabled: bool) -> (Color32, Color32) {
     let p = t::p();
     let (fill, text) = match kind {
-        ButtonKind::Primary => (p.accent.lerp_to_gamma(p.accent_hover, hover), p.on_accent),
-        ButtonKind::Secondary => (p.surface_3.lerp_to_gamma(p.row_active, hover), p.text),
+        ButtonKind::Primary => (p.accent_strong.lerp_to_gamma(p.accent_strong_hover, hover), p.on_accent),
+        ButtonKind::Secondary => (p.row_active.lerp_to_gamma(p.border, hover), p.text),
         ButtonKind::Danger => (p.danger.lerp_to_gamma(p.danger_hover, hover), Color32::WHITE),
         ButtonKind::Ghost => (Color32::TRANSPARENT.lerp_to_gamma(p.row_hover, hover), p.text),
     };

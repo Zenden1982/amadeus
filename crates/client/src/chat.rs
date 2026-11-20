@@ -920,7 +920,7 @@ impl Chat {
             });
         }
         Frame::new()
-            .fill(t::p().surface)
+            .fill(t::p().surface_2)
             .stroke(Stroke::new(1.0, if ui.memory(|m| m.has_focus(id)) { t::p().accent.gamma_multiply(0.7) } else { t::p().border }))
             .corner_radius(CornerRadius::same(kit::R_CARD))
             .inner_margin(Margin { left: 8, right: 8, top: 5, bottom: 5 })

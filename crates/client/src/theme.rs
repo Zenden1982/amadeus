@@ -6,21 +6,35 @@ use eframe::egui::{
 };
 
 /// Смысловые цвета темы. Экраны берут цвета только отсюда: `t::p().text` и т. п.
+/// Значения — из пакета бренда Murmur (`palette.json`); производные (рамки, подложки ошибок) — смешением токенов.
+/// Соответствие токенам бренда: bg = bg_main, rail = bg_rail, surface = bg_sidebar, surface_2/3 = bg_elevated,
+/// text = text_primary, text_muted = text_secondary, text_faint = text_muted, accent_text = link.
 #[derive(Debug)]
-#[allow(dead_code)] // часть полей понадобится набору деталей (kit) — задачи 3–4
+#[allow(dead_code)] // статусы и mention_bg — для будущих экранов (статус «не беспокоить», упоминания)
 pub struct Palette {
+    /// Основная область (чат, заголовок).
     pub bg: Color32,
+    /// Колонка серверов — самый тёмный (в светлой — самый серый) слой. Заголовок окна: тёмная — тот же, светлая — как список каналов
+    /// (на bg_rail ссылка бренда #0F766E даёт 4.3:1 — мало для мелкого текста).
+    pub rail: Color32,
+    /// Список каналов, док.
     pub surface: Color32,
+    /// Поля ввода, карточки, всплывающие меню, модальные окна.
     pub surface_2: Color32,
+    /// Значки серверов, подложки мелких элементов.
     pub surface_3: Color32,
     pub border: Color32,
     pub border_strong: Color32,
     pub text: Color32,
     pub text_muted: Color32,
     pub text_faint: Color32,
+    /// Фирменный бирюзовый: иконки, контуры, фокус, ползунки. Под белый текст не годится — для этого `accent_strong`.
     pub accent: Color32,
     pub accent_hover: Color32,
     pub accent_soft: Color32,
+    /// Заливка кнопок с белым текстом.
+    pub accent_strong: Color32,
+    pub accent_strong_hover: Color32,
     /// Акцент для мелкого текста (ссылки, «доступна версия», бейдж) — читаемый на фоне (≥ 4.5:1).
     pub accent_text: Color32,
     pub on_accent: Color32,
@@ -39,72 +53,97 @@ pub struct Palette {
     pub row_hover: Color32,
     pub row_active: Color32,
     pub title_bg: Color32,
+    pub status_online: Color32,
+    pub status_idle: Color32,
+    pub status_dnd: Color32,
+    pub status_offline: Color32,
+    pub warning: Color32,
+    /// Фон сообщения с упоминанием (премультиплицирован).
+    pub mention_bg: Color32,
 }
 
-/// Тёмная: нейтральный графит, мягкий синий акцент.
+/// Тёмная: холодный серый, бирюзовый акцент.
 pub static DARK: Palette = Palette {
-    bg: Color32::from_rgb(0x11, 0x13, 0x17),
-    surface: Color32::from_rgb(0x16, 0x19, 0x1E),
-    surface_2: Color32::from_rgb(0x1C, 0x20, 0x26),
-    surface_3: Color32::from_rgb(0x24, 0x29, 0x32),
-    border: Color32::from_rgb(0x2A, 0x2F, 0x38),
-    border_strong: Color32::from_rgb(0x3A, 0x41, 0x4D),
-    text: Color32::from_rgb(0xE9, 0xEC, 0xF1),
-    text_muted: Color32::from_rgb(0x8B, 0x93, 0xA1),
-    text_faint: Color32::from_rgb(0x5E, 0x65, 0x73),
-    accent: Color32::from_rgb(0x5B, 0x8C, 0xFF),
-    accent_hover: Color32::from_rgb(0x7A, 0xA2, 0xFF),
-    accent_soft: Color32::from_rgba_unmultiplied_const(0x5B, 0x8C, 0xFF, 40),
-    accent_text: Color32::from_rgb(0x8F, 0xB0, 0xFF),
+    bg: Color32::from_rgb(0x22, 0x27, 0x2B),
+    rail: Color32::from_rgb(0x15, 0x18, 0x1B),
+    surface: Color32::from_rgb(0x1B, 0x1F, 0x23),
+    surface_2: Color32::from_rgb(0x2A, 0x30, 0x35),
+    surface_3: Color32::from_rgb(0x2A, 0x30, 0x35),
+    border: Color32::from_rgb(0x3A, 0x42, 0x49),
+    border_strong: Color32::from_rgb(0x4E, 0x58, 0x5F),
+    text: Color32::from_rgb(0xE6, 0xED, 0xF0),
+    text_muted: Color32::from_rgb(0xA9, 0xB4, 0xBA),
+    text_faint: Color32::from_rgb(0x7E, 0x8A, 0x91),
+    accent: Color32::from_rgb(0x14, 0xB8, 0xA6),
+    accent_hover: Color32::from_rgb(0x2D, 0xD4, 0xBF),
+    accent_soft: Color32::from_rgba_premultiplied(3, 27, 25, 38),
+    accent_strong: Color32::from_rgb(0x0F, 0x76, 0x6E),
+    accent_strong_hover: Color32::from_rgb(0x11, 0x5E, 0x59),
+    accent_text: Color32::from_rgb(0x2D, 0xD4, 0xBF),
     on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-    speaking: Color32::from_rgb(0x3D, 0xD6, 0x8C),
-    danger: Color32::from_rgb(0xE5, 0x48, 0x4D),
-    danger_hover: Color32::from_rgb(0xF2, 0x55, 0x5A),
-    danger_text: Color32::from_rgb(0xFF, 0x9A, 0x9C),
-    danger_soft: Color32::from_rgba_unmultiplied_const(0xE5, 0x48, 0x4D, 40),
-    warn_bg: Color32::from_rgb(0x2B, 0x24, 0x16),
-    warn_border: Color32::from_rgb(0x6B, 0x56, 0x26),
-    error_bg: Color32::from_rgb(0x2C, 0x17, 0x19),
-    error_border: Color32::from_rgb(0x6B, 0x2C, 0x30),
-    success: Color32::from_rgb(0x3D, 0xD6, 0x8C),
+    speaking: Color32::from_rgb(0x2D, 0xD4, 0xBF),
+    danger: Color32::from_rgb(0xDC, 0x26, 0x26),
+    danger_hover: Color32::from_rgb(0xB9, 0x1C, 0x1C),
+    danger_text: Color32::from_rgb(0xF8, 0x71, 0x71),
+    danger_soft: Color32::from_rgba_unmultiplied_const(0xDC, 0x26, 0x26, 40),
+    warn_bg: Color32::from_rgb(0x3B, 0x35, 0x27),
+    warn_border: Color32::from_rgb(0x81, 0x5D, 0x1D),
+    error_bg: Color32::from_rgb(0x38, 0x27, 0x2A),
+    error_border: Color32::from_rgb(0x76, 0x27, 0x29),
+    success: Color32::from_rgb(0x22, 0xC5, 0x5E),
     scrim: Color32::from_rgba_unmultiplied_const(0x05, 0x06, 0x08, 190),
     video_bg: Color32::from_rgb(0x0A, 0x0B, 0x0D),
-    row_hover: Color32::from_rgb(0x1F, 0x23, 0x2A),
-    row_active: Color32::from_rgb(0x25, 0x2B, 0x35),
-    title_bg: Color32::from_rgb(0x0E, 0x10, 0x13),
+    row_hover: Color32::from_rgb(0x2A, 0x30, 0x35),
+    row_active: Color32::from_rgb(0x32, 0x3A, 0x40),
+    title_bg: Color32::from_rgb(0x15, 0x18, 0x1B),
+    status_online: Color32::from_rgb(0x22, 0xC5, 0x5E),
+    status_idle: Color32::from_rgb(0xF5, 0x9E, 0x0B),
+    status_dnd: Color32::from_rgb(0xEF, 0x44, 0x44),
+    status_offline: Color32::from_rgb(0x7E, 0x8A, 0x91),
+    warning: Color32::from_rgb(0xF5, 0x9E, 0x0B),
+    mention_bg: Color32::from_rgba_premultiplied(30, 19, 1, 31),
 };
 
-/// Светлая: белые панели на сером фоне, тот же акцент.
+/// Светлая: белая основная область, серо-голубые боковые панели.
 pub static LIGHT: Palette = Palette {
-    bg: Color32::from_rgb(0xF2, 0xF3, 0xF6),
-    surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-    surface_2: Color32::from_rgb(0xF7, 0xF8, 0xFA),
-    surface_3: Color32::from_rgb(0xEC, 0xEE, 0xF2),
-    border: Color32::from_rgb(0xE3, 0xE6, 0xEC),
-    border_strong: Color32::from_rgb(0xC9, 0xCE, 0xD8),
-    text: Color32::from_rgb(0x16, 0x18, 0x1D),
-    text_muted: Color32::from_rgb(0x6B, 0x71, 0x83),
-    text_faint: Color32::from_rgb(0x9A, 0xA0, 0xAE),
-    accent: Color32::from_rgb(0x5B, 0x8C, 0xFF),
-    accent_hover: Color32::from_rgb(0x4A, 0x7B, 0xF7),
-    accent_soft: Color32::from_rgba_unmultiplied_const(0x5B, 0x8C, 0xFF, 36),
-    accent_text: Color32::from_rgb(0x2F, 0x5F, 0xD8),
+    bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    rail: Color32::from_rgb(0xDF, 0xE6, 0xE9),
+    surface: Color32::from_rgb(0xED, 0xF2, 0xF4),
+    surface_2: Color32::from_rgb(0xF4, 0xF7, 0xF8),
+    surface_3: Color32::from_rgb(0xF4, 0xF7, 0xF8),
+    border: Color32::from_rgb(0xD3, 0xDC, 0xE0),
+    border_strong: Color32::from_rgb(0xB8, 0xC2, 0xC7),
+    text: Color32::from_rgb(0x0F, 0x1A, 0x1E),
+    text_muted: Color32::from_rgb(0x46, 0x55, 0x5C),
+    text_faint: Color32::from_rgb(0x66, 0x75, 0x7C),
+    accent: Color32::from_rgb(0x0D, 0x94, 0x88),
+    accent_hover: Color32::from_rgb(0x0F, 0x76, 0x6E),
+    accent_soft: Color32::from_rgba_premultiplied(2, 18, 17, 31),
+    accent_strong: Color32::from_rgb(0x0F, 0x76, 0x6E),
+    accent_strong_hover: Color32::from_rgb(0x11, 0x5E, 0x59),
+    accent_text: Color32::from_rgb(0x0F, 0x76, 0x6E),
     on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-    speaking: Color32::from_rgb(0x1F, 0xAF, 0x6B),
-    danger: Color32::from_rgb(0xE5, 0x48, 0x4D),
-    danger_hover: Color32::from_rgb(0xD6, 0x3B, 0x40),
-    danger_text: Color32::from_rgb(0xB4, 0x23, 0x18),
-    danger_soft: Color32::from_rgba_unmultiplied_const(0xE5, 0x48, 0x4D, 30),
-    warn_bg: Color32::from_rgb(0xFF, 0xF6, 0xE0),
-    warn_border: Color32::from_rgb(0xF0, 0xC8, 0x70),
-    error_bg: Color32::from_rgb(0xFD, 0xEC, 0xEC),
-    error_border: Color32::from_rgb(0xF2, 0xB8, 0xB5),
-    success: Color32::from_rgb(0x1F, 0xAF, 0x6B),
+    speaking: Color32::from_rgb(0x0D, 0x94, 0x88),
+    danger: Color32::from_rgb(0xDC, 0x26, 0x26),
+    danger_hover: Color32::from_rgb(0xB9, 0x1C, 0x1C),
+    danger_text: Color32::from_rgb(0xB9, 0x1C, 0x1C),
+    danger_soft: Color32::from_rgba_unmultiplied_const(0xDC, 0x26, 0x26, 30),
+    warn_bg: Color32::from_rgb(0xF8, 0xEE, 0xE6),
+    warn_border: Color32::from_rgb(0xDD, 0xB2, 0x90),
+    error_bg: Color32::from_rgb(0xFC, 0xE9, 0xE9),
+    error_border: Color32::from_rgb(0xEF, 0x9D, 0x9D),
+    success: Color32::from_rgb(0x15, 0x80, 0x3D),
     scrim: Color32::from_rgba_unmultiplied_const(0x14, 0x16, 0x1C, 120),
     video_bg: Color32::from_rgb(0x0A, 0x0B, 0x0D),
-    row_hover: Color32::from_rgb(0xEE, 0xF0, 0xF4),
-    row_active: Color32::from_rgb(0xE6, 0xEA, 0xF7),
-    title_bg: Color32::from_rgb(0xE9, 0xEB, 0xF0),
+    row_hover: Color32::from_rgb(0xE6, 0xED, 0xF0),
+    row_active: Color32::from_rgb(0xDD, 0xE5, 0xE8),
+    title_bg: Color32::from_rgb(0xED, 0xF2, 0xF4),
+    status_online: Color32::from_rgb(0x16, 0xA3, 0x4A),
+    status_idle: Color32::from_rgb(0xD9, 0x77, 0x06),
+    status_dnd: Color32::from_rgb(0xDC, 0x26, 0x26),
+    status_offline: Color32::from_rgb(0x8A, 0x97, 0x9D),
+    warning: Color32::from_rgb(0xB4, 0x53, 0x09),
+    mention_bg: Color32::from_rgba_premultiplied(37, 24, 2, 38),
 };
 
 static CURRENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -363,9 +402,11 @@ mod tests {
         for (name, p) in [("dark", &DARK), ("light", &LIGHT)] {
             assert!(contrast(p.text, p.bg) >= 4.5, "{name}: text/bg");
             assert!(contrast(p.text, p.surface) >= 4.5, "{name}: text/surface");
-            // Текст на акценте — только жирный (кнопки), для него хватает 3:1; акцент #5B8CFF — из спеки.
-            assert!(contrast(p.on_accent, p.accent) >= 3.0, "{name}: on_accent/accent {}", contrast(p.on_accent, p.accent));
-            assert!(contrast(p.text_muted, p.surface) >= 3.0, "{name}: muted/surface");
+            // Белый текст — только на accent_strong (бренд: на accent контраста не хватает).
+            assert!(contrast(p.on_accent, p.accent_strong) >= 4.5, "{name}: on_accent/accent_strong {}", contrast(p.on_accent, p.accent_strong));
+            assert!(contrast(p.on_accent, p.danger) >= 4.5, "{name}: on_accent/danger");
+            assert!(contrast(p.text_muted, p.surface) >= 4.5, "{name}: muted/surface");
+            assert!(contrast(p.text_faint, p.bg) >= 3.0, "{name}: faint/bg");
             assert!(contrast(p.danger_text, p.error_bg) >= 4.5, "{name}: danger_text/error_bg");
         }
     }

@@ -53,7 +53,7 @@ pub fn server_icon(ui: &mut Ui, mark: &ServerMark, active: bool, tip: &str) -> R
     let painter = ui.painter();
     match mark {
         ServerMark::Letter(s) => {
-            let bg = if active { p.accent } else { p.surface_3.lerp_to_gamma(p.row_active, k) };
+            let bg = if active { p.accent_strong } else { p.surface_3.lerp_to_gamma(p.row_active, k) };
             painter.rect_filled(rect, CornerRadius::same(r), bg);
             let fg = if active { p.on_accent } else { p.text };
             painter.text(rect.center(), Align2::CENTER_CENTER, s, t::xbold(17.0), fg);

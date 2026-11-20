@@ -16,7 +16,7 @@ pub enum ModalResult {
 pub fn modal(ctx: &egui::Context, id: &str, title: &str, width: f32, body: impl FnOnce(&mut Ui)) -> ModalResult {
     let p = t::p();
     let frame = Frame::new()
-        .fill(p.surface)
+        .fill(p.surface_2)
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(18))
         .inner_margin(Margin::same(22))
