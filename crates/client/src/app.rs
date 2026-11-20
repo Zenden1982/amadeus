@@ -108,6 +108,8 @@ pub struct App {
     channel_list: ChannelsUi,
     server_settings: crate::server_settings::ServerSettings,
     avatar_crop: Option<crate::crop::CropDialog>,
+    /// Канал, из которого уже вышли, потому что он пропал (чтобы не слать Leave каждый кадр).
+    left_gone: Option<i64>,
     /// Каналы активного сервера (из модели; в демо — свои).
     channels: Vec<Channel>,
     channels_at: Instant,
@@ -256,6 +258,7 @@ impl App {
             channel_list,
             server_settings,
             avatar_crop: None,
+            left_gone: None,
             channels: Vec::new(),
             channels_at: Instant::now(),
             settings_open: false,
@@ -391,7 +394,7 @@ impl App {
     /// Перечитать серверы, каналы, участников и голос.
     fn fetch_channels(&mut self) {
         self.channels_at = Instant::now();
-        self.servers.reload();
+        self.servers.reload(self.model.seq());
     }
 
     /// Первая загрузка серверов: выбрать сохранённый, отладочные автодействия.
@@ -427,6 +430,26 @@ impl App {
             && !self.channels.iter().any(|c| c.id == id && c.kind == ChannelKind::Text)
         {
             self.view = View::Voice;
+        }
+    }
+
+    /// Сервер ушёл (кик, бан, удалён) или канал удалён — выйти из голоса самому, не дожидаясь сервера.
+    fn leave_if_gone(&mut self, vs: &VoiceState) {
+        if self.demo || !self.servers.loaded_once() {
+            return;
+        }
+        let active = matches!(vs.conn, Conn::Connecting | Conn::Connected | Conn::Reconnecting | Conn::Rejoining { .. });
+        if vs.channel.as_ref().is_some_and(|ch| !self.model.voice_channel_gone(ch)) {
+            self.left_gone = None;
+        }
+        if let Some(ch) = &vs.channel
+            && active
+            && self.model.voice_channel_gone(ch)
+            && self.left_gone != Some(ch.id)
+        {
+            log::info!("канал {} больше недоступен — выхожу из голоса", ch.id);
+            self.left_gone = Some(ch.id);
+            self.voice.send(Cmd::Leave);
         }
     }
 
@@ -837,6 +860,7 @@ impl App {
         #[cfg(debug_assertions)]
         self.debug_autowatch(ui, &vs);
         self.chat.ensure_stream();
+        self.leave_if_gone(&vs);
         self.sync_focus(ui, &vs);
         if self.fullscreen {
             self.ui_fullscreen(ui, &vs);

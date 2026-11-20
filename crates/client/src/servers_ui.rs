@@ -29,7 +29,8 @@ pub struct Loaded {
 }
 
 enum Ev {
-    All(ApiResult<Vec<Loaded>>),
+    /// `since` — `Model::seq` в момент запроса.
+    All { since: u64, res: ApiResult<Vec<Loaded>> },
     One(ApiResult<Loaded>),
     Created(Result<Server, String>),
     Joined(Result<Server, String>),
@@ -150,8 +151,12 @@ impl ServersUi {
         });
     }
 
-    /// Перечитать все мои серверы.
-    pub fn reload(&self) {
+    pub fn loaded_once(&self) -> bool {
+        self.loaded_once
+    }
+
+    /// Перечитать все мои серверы (`since` — `Model::seq()` сейчас).
+    pub fn reload(&self, since: u64) {
         if !self.api.has_token() {
             return;
         }
@@ -166,7 +171,7 @@ impl ServersUi {
                 Ok(out)
             }
             .await;
-            Ev::All(res)
+            Ev::All { since, res }
         });
     }
 
@@ -180,7 +185,9 @@ impl ServersUi {
         let mut out = PollOut::default();
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Ev::All(Ok(list)) => {
+                Ev::All { since, res: Ok(list) } => {
+                    // сервер удалили, пока шёл запрос — его данные не возвращаем
+                    let list: Vec<Loaded> = list.into_iter().filter(|l| model.accept_snapshot(since, l.server.id)).collect();
                     model.set_servers(list.iter().map(|l| l.server.clone()).collect());
                     for l in list {
                         put(model, people, l);
@@ -191,13 +198,15 @@ impl ServersUi {
                         out.first_load = true;
                     }
                 }
-                Ev::All(Err(e)) | Ev::One(Err(e)) => {
+                Ev::All { res: Err(e), .. } | Ev::One(Err(e)) => {
                     out.unauthorized |= e.is_unauthorized();
                     self.load_error = Some(e.message);
                 }
                 Ev::One(Ok(l)) => {
-                    model.apply(&proto::ServerEvent::ServerUpserted { server: l.server.clone() });
-                    put(model, people, l);
+                    // только если я всё ещё на сервере (могли выгнать, пока шёл запрос)
+                    if model.server(l.server.id).is_some() {
+                        put(model, people, l);
+                    }
                 }
                 Ev::Created(res) | Ev::Joined(res) => {
                     if let Some(d) = self.add.as_mut() {
@@ -482,15 +491,19 @@ impl ServersUi {
                 AddTab::Create => {
                     let (name, icon) = (d.name.trim().to_string(), d.icon.clone());
                     self.spawn(async move {
-                        let res = async {
-                            let s = api.create_server(&name).await?;
-                            match icon {
-                                Some(png) => api.put_server_icon(s.id, png).await,
-                                None => Ok(s),
-                            }
-                        }
-                        .await;
-                        Ev::Created(res.map_err(|e| e.message))
+                        let s = match api.create_server(&name).await {
+                            Ok(s) => s,
+                            Err(e) => return Ev::Created(Err(e.message)),
+                        };
+                        // сервер уже создан: ошибка значка не повод создавать его ещё раз
+                        let s = match icon {
+                            Some(png) => api.put_server_icon(s.id, png).await.unwrap_or_else(|e| {
+                                log::warn!("значок нового сервера {}: {e}", s.id);
+                                s
+                            }),
+                            None => s,
+                        };
+                        Ev::Created(Ok(s))
                     });
                 }
                 AddTab::Join => {

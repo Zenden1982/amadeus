@@ -534,7 +534,7 @@ mod tests {
             Role { id: 12, name: "Модератор".into(), position: 1, permissions: perm::INVITE | perm::KICK | perm::BAN | perm::DISCONNECT },
             Role { id: 13, name: "Участник".into(), position: 0, permissions: perm::INVITE },
         ];
-        let mut m = Model { me: Some(5), ..Default::default() };
+        let mut m = Model::with_me(5);
         m.set_servers(vec![Server { id: 1, name: "s".into(), icon: None, owner_id: 9, roles, my_role_id: my_role }]);
         let u = |id: i64| PublicUser { id, name: format!("u{id}"), display_name: None, avatar: None };
         m.set_members(1, vec![

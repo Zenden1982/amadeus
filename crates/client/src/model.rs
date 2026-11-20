@@ -16,6 +16,10 @@ pub struct Model {
     /// Канал → кто в голосе.
     pub voice: HashMap<i64, Vec<i64>>,
     pub users: HashMap<i64, PublicUser>,
+    /// Счётчик удалений серверов (для отбраковки устаревших ответов загрузки).
+    seq: u64,
+    /// Сервер → номер удаления.
+    removed: HashMap<i64, u64>,
 }
 
 impl Model {
@@ -37,6 +41,9 @@ impl Model {
     }
 
     pub fn set_members(&mut self, server: i64, list: Vec<Member>) {
+        if !self.has_server(server) {
+            return;
+        }
         for m in &list {
             self.users.insert(m.user.id, m.user.clone());
         }
@@ -44,17 +51,46 @@ impl Model {
     }
 
     pub fn set_layout(&mut self, server: i64, layout: ChannelLayout) {
+        if !self.has_server(server) {
+            return;
+        }
         self.layouts.insert(server, layout);
     }
 
     /// Ответ `GET /servers/{id}/voice`: все голосовые каналы сервера сразу.
     pub fn set_voice(&mut self, server: i64, rosters: Vec<VoiceRoster>) {
+        if !self.has_server(server) {
+            return;
+        }
         for ch in self.channel_ids(server) {
             self.voice.remove(&ch);
         }
         for r in rosters {
             self.put_roster(r);
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_me(me: i64) -> Self {
+        Self { me: Some(me), ..Default::default() }
+    }
+
+    /// Отметка для запроса загрузки: с ней сравнивается `accept_snapshot`.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Ответ загрузки, начатой при `since`, можно применить к серверу (его не удалили после начала запроса).
+    pub fn accept_snapshot(&self, since: u64, server: i64) -> bool {
+        self.removed.get(&server).is_none_or(|&s| s <= since)
+    }
+
+    /// Мой голосовой канал пропал: сервер ушёл или канал удалён (раскладка известна).
+    pub fn voice_channel_gone(&self, ch: &Channel) -> bool {
+        if !self.has_server(ch.server_id) {
+            return true;
+        }
+        self.layouts.get(&ch.server_id).is_some_and(|l| !l.channels.iter().any(|c| c.id == ch.id))
     }
 
     /// Сервер есть, а раскладки ещё нет (вступил по событию) — надо загрузить.
@@ -104,6 +140,7 @@ impl Model {
     pub fn apply(&mut self, e: &ServerEvent) {
         match e {
             ServerEvent::ServerUpserted { server } => {
+                self.removed.remove(&server.id);
                 match self.servers.iter_mut().find(|s| s.id == server.id) {
                     Some(s) => *s = server.clone(),
                     None => self.servers.push(server.clone()),
@@ -111,6 +148,8 @@ impl Model {
                 self.fix_active();
             }
             ServerEvent::ServerRemoved { server_id } => {
+                self.seq += 1;
+                self.removed.insert(*server_id, self.seq);
                 self.servers.retain(|s| s.id != *server_id);
                 self.forget(*server_id);
                 self.fix_active();
@@ -134,9 +173,7 @@ impl Model {
                     list.retain(|m| m.user.id != *user_id);
                 }
             }
-            ServerEvent::LayoutChanged { server_id, layout } => {
-                self.layouts.insert(*server_id, layout.clone());
-            }
+            ServerEvent::LayoutChanged { server_id, layout } => self.set_layout(*server_id, layout.clone()),
             ServerEvent::Voice { roster, .. } => self.put_roster(roster.clone()),
             ServerEvent::UserUpdated { user } => {
                 self.users.insert(user.id, user.clone());
@@ -311,7 +348,7 @@ mod tests {
 
     #[test]
     fn my_perms_from_role() {
-        let mut m = Model { me: Some(5), ..Default::default() };
+        let mut m = Model::with_me(5);
         m.set_servers(vec![server(1, 12)]);
         assert_eq!(m.my_perms(1), perm::INVITE | perm::KICK | perm::BAN | perm::DISCONNECT);
         assert_eq!(m.my_perms(99), 0, "чужой сервер — прав нет");
@@ -331,8 +368,48 @@ mod tests {
     }
 
     #[test]
+    fn late_data_for_removed_server_is_ignored() {
+        let mut m = Model::default();
+        m.set_servers(vec![server(1, 13), server(2, 13)]);
+        m.apply(&ServerEvent::ServerRemoved { server_id: 2 });
+        m.set_layout(2, ChannelLayout { categories: vec![], channels: vec![ch(5, None, 0)] });
+        m.set_members(2, vec![Member { user: user(7, "x"), role_id: 13 }]);
+        m.apply(&ServerEvent::LayoutChanged { server_id: 2, layout: ChannelLayout { categories: vec![], channels: vec![] } });
+        assert!(!m.layouts.contains_key(&2), "раскладка ушедшего сервера не возвращается");
+        assert!(!m.members.contains_key(&2));
+        // вернулся по приглашению — надо загрузить заново
+        m.apply(&ServerEvent::ServerUpserted { server: server(2, 13) });
+        assert!(m.needs_load(2));
+    }
+
+    #[test]
+    fn snapshot_started_before_removal_is_rejected() {
+        let mut m = Model::default();
+        m.set_servers(vec![server(1, 13), server(2, 13)]);
+        let since = m.seq();
+        m.apply(&ServerEvent::ServerRemoved { server_id: 2 });
+        assert!(!m.accept_snapshot(since, 2), "ответ запроса, начатого до удаления, не воскрешает сервер");
+        assert!(m.accept_snapshot(since, 1));
+        assert!(m.accept_snapshot(m.seq(), 2), "запрос после удаления — честный ответ");
+    }
+
+    #[test]
+    fn voice_channel_gone_when_server_or_channel_removed() {
+        let mut m = Model::default();
+        m.set_servers(vec![server(1, 13)]);
+        m.set_layout(1, ChannelLayout { categories: vec![], channels: vec![ch(5, None, 0)] });
+        let mine = ch(5, None, 0);
+        assert!(!m.voice_channel_gone(&mine));
+        m.set_layout(1, ChannelLayout { categories: vec![], channels: vec![] });
+        assert!(m.voice_channel_gone(&mine), "канал удалён");
+        m.set_layout(1, ChannelLayout { categories: vec![], channels: vec![ch(5, None, 0)] });
+        m.apply(&ServerEvent::ServerRemoved { server_id: 1 });
+        assert!(m.voice_channel_gone(&mine), "сервер пропал");
+    }
+
+    #[test]
     fn hierarchy_can_act_and_assign() {
-        let mut m = Model { me: Some(5), ..Default::default() };
+        let mut m = Model::with_me(5);
         m.set_servers(vec![server(1, 12)]); // модератор
         m.set_members(1, vec![Member { user: user(5, "me"), role_id: 12 }, Member { user: user(6, "a"), role_id: 11 }, Member { user: user(7, "b"), role_id: 13 }]);
         assert!(!m.can_act_on(1, 6), "админ выше модератора");
