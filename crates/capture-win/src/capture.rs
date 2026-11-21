@@ -29,6 +29,10 @@ use crate::sources::{SourceId, fit};
 
 /// Повтор последнего кадра при статичной картинке.
 const REPEAT_EVERY: Duration = Duration::from_millis(1000);
+/// Сколько без новых кадров, прежде чем проверять, не перекрыто ли окно.
+pub const STALL: Duration = Duration::from_millis(2000);
+/// Как часто проверять перекрытие (геометрия окон — дёшево, но не на каждом кадре).
+pub const OCCLUSION_CHECK: Duration = Duration::from_millis(500);
 const POLL: Duration = Duration::from_millis(100);
 const MINIMIZED_CHECK: Duration = Duration::from_millis(250);
 
@@ -47,6 +51,9 @@ pub enum Event {
     /// Размер отправляемого видео изменился (окно изменили).
     Resized { width: u32, height: u32 },
     Minimized(bool),
+    /// Окно не свёрнуто, но новых кадров нет дольше [`STALL`] и оно целиком закрыто другими окнами: браузеры (и не только)
+    /// перестают рисовать перекрытые окна — у зрителей стоп-кадр. false — кадры пошли снова.
+    Hidden(bool),
     /// Аппаратный путь: размер источника устойчиво изменился, энкодер (фиксированного размера) надо пересоздать
     /// под новый размер отправляемого видео.
     SizeChanged { width: u32, height: u32 },
@@ -327,6 +334,11 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
     let mut minimized = false;
     let mut min_check = Instant::now();
     let mut closed_sent = false;
+    let mut last_fresh = Instant::now();
+    let mut hidden = false;
+    let mut occl_check = Instant::now();
+    let (mut diag_at, mut diag_live, mut diag_rep) = (Instant::now(), 0u32, 0u32);
+    let mut screen = crate::diag::ScreenWatch::default();
     loop {
         let fresh = {
             let mut slot = shared.slot.lock().unwrap();
@@ -364,8 +376,37 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
                 }
             }
         }
+        if source.is_window() && occl_check.elapsed() >= OCCLUSION_CHECK {
+            occl_check = Instant::now();
+            let h = !minimized && last_fresh.elapsed() >= STALL && source.is_occluded();
+            if h != hidden {
+                hidden = h;
+                log::info!("захват: окно {}", if h { "перекрыто — новых кадров нет" } else { "снова присылает кадры" });
+                shared.sink.event(Event::Hidden(h));
+            }
+        }
+        if crate::diag::on() && diag_at.elapsed() >= Duration::from_secs(1) {
+            diag_at = Instant::now();
+            let (occ, chg) = match source {
+                SourceId::Window(h) => (if source.is_occluded() { "да" } else { "нет" }, screen.changed(h)),
+                SourceId::Monitor(_) => ("—", "—"),
+            };
+            log::info!(
+                "ДИАГ захват (процессор): живых {diag_live}, повторов {diag_rep}, без кадров {} мс, свёрнуто {}, перекрыто {occ}, экран под окном меняется {chg}, в фокусе «{}»",
+                last_fresh.elapsed().as_millis(),
+                if minimized { "да" } else { "нет" },
+                crate::diag::foreground_title()
+            );
+            (diag_live, diag_rep) = (0, 0);
+        }
         if let Some(buf) = fresh
             && !minimized {
+                let gap = last_fresh.elapsed();
+                if crate::diag::on() && size != (0, 0) && gap >= Duration::from_millis(400) {
+                    log::info!("ДИАГ захват: живых кадров не было {} мс", gap.as_millis());
+                }
+                diag_live += 1;
+                last_fresh = Instant::now();
                 let s = (buf.width(), buf.height());
                 if size == (0, 0) {
                     shared.sink.event(Event::Started { width: s.0, height: s.1 });
@@ -381,6 +422,7 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
         if last_sent.elapsed() >= REPEAT_EVERY
             && let Some(buf) = &last {
                 shared.sink.frame(buf, now_us());
+                diag_rep += 1;
                 last_sent = Instant::now();
             }
     }

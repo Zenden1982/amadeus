@@ -6,6 +6,10 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Подробные логи трансляции раз в секунду (сборка «с отладкой»).
+diag = []
+
 [dependencies]
 # Тот же libwebrtc, что внутри livekit (патченый, см. [patch.crates-io]): I420Buffer + libyuv.
 libwebrtc = "0.4.1"

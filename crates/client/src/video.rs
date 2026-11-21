@@ -92,7 +92,17 @@ impl VideoHub {
             let mut stream = NativeVideoStream::new(track.rtc_track());
             let mut fps = Fps::default();
             let mut warned = false;
+            let mut last_at: Option<Instant> = None;
             while let Some(frame) = stream.next().await {
+                if capture_win::diag::on() {
+                    let now = Instant::now();
+                    if let Some(t) = last_at
+                        && now.duration_since(t) >= Duration::from_millis(400)
+                    {
+                        log::info!("ДИАГ зритель {identity}: кадров не было {} мс", now.duration_since(t).as_millis());
+                    }
+                    last_at = Some(now);
+                }
                 let image = tokio::task::block_in_place(|| to_image(frame.buffer.as_ref()));
                 match image {
                     Some(image) => hub.put(&identity, image, fps.tick()),

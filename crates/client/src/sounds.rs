@@ -1,4 +1,4 @@
-//! Короткие звуки входа/выхода. Синтезируются при старте (WAV в памяти) и играются через
+//! Короткие звуки: вход/выход из голоса, начало/конец трансляции, зрители своей трансляции. Синтезируются при старте (WAV в памяти) и играются через
 //! PlaySound на системном устройстве вывода по умолчанию.
 
 use std::sync::OnceLock;
@@ -9,6 +9,14 @@ pub enum Sound {
     LeaveSelf,
     JoinOther,
     LeaveOther,
+    /// Кто-то (или вы) начал трансляцию.
+    StreamStart,
+    /// Трансляция закончилась.
+    StreamStop,
+    /// Вашу трансляцию начали смотреть.
+    ViewerJoin,
+    /// Вашу трансляцию перестали смотреть.
+    ViewerLeave,
 }
 
 const RATE: u32 = 44_100;
@@ -62,6 +70,10 @@ struct Bank {
     leave_self: Vec<u8>,
     join_other: Vec<u8>,
     leave_other: Vec<u8>,
+    stream_start: Vec<u8>,
+    stream_stop: Vec<u8>,
+    viewer_join: Vec<u8>,
+    viewer_leave: Vec<u8>,
 }
 
 fn bank() -> &'static Bank {
@@ -71,6 +83,12 @@ fn bank() -> &'static Bank {
         leave_self: build(&[(783.99, 90), (523.25, 140)], 0.22),
         join_other: build(&[(659.25, 70), (880.0, 110)], 0.16),
         leave_other: build(&[(880.0, 70), (659.25, 110)], 0.16),
+        // трансляция — три ноты (ре–соль–до), выше и «ярче» голосовых
+        stream_start: build(&[(587.33, 60), (783.99, 60), (1046.5, 150)], 0.18),
+        stream_stop: build(&[(1046.5, 60), (783.99, 60), (587.33, 150)], 0.18),
+        // зритель — короткий тихий «блик»
+        viewer_join: build(&[(1174.66, 50), (1567.98, 90)], 0.11),
+        viewer_leave: build(&[(1567.98, 50), (1174.66, 90)], 0.11),
     })
 }
 
@@ -81,6 +99,10 @@ pub fn play(s: Sound) {
         Sound::LeaveSelf => &b.leave_self,
         Sound::JoinOther => &b.join_other,
         Sound::LeaveOther => &b.leave_other,
+        Sound::StreamStart => &b.stream_start,
+        Sound::StreamStop => &b.stream_stop,
+        Sound::ViewerJoin => &b.viewer_join,
+        Sound::ViewerLeave => &b.viewer_leave,
     };
     #[cfg(windows)]
     unsafe {

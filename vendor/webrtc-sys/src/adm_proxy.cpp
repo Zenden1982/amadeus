@@ -355,18 +355,25 @@ int32_t AdmProxy::Init() {
   return 0;
 }
 
+// Amadeus patch: WebRTC зовёт Terminate(), когда закрывается последняя комната (движок голоса
+// уничтожается), а AdmProxy живёт дольше — до конца фабрики. Раньше здесь терминировались и
+// sub-ADM, а Init() — no-op: после первого выхода из комнаты устройство Windows оставалось
+// закрытым, и при следующем входе не было ни микрофона («Failed to initialize recording»),
+// ни звука в динамиках. Теперь только останавливаем; настоящий Terminate — в деструкторе.
 int32_t AdmProxy::Terminate() {
   return RunOnWorker([this] {
     RTC_DCHECK_RUN_ON(worker_thread_);
-    int32_t result = 0;
+    RTC_LOG(LS_INFO) << "AdmProxy::Terminate(): sub-ADMs stopped, not terminated (Amadeus patch)";
+    recording_ = false;
+    playing_ = false;
     if (synthetic_adm_) {
-      result = synthetic_adm_->Terminate();
+      synthetic_adm_->StopPlayout();
     }
     if (platform_adm_) {
-      int32_t platform_result = platform_adm_->Terminate();
-      if (result == 0) result = platform_result;
+      platform_adm_->StopRecording();
+      platform_adm_->StopPlayout();
     }
-    return result;
+    return 0;
   });
 }
 

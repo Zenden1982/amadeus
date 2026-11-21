@@ -49,6 +49,48 @@ pub fn set_fullscreen_style(on: bool) {
     let _ = on;
 }
 
+/// Альфа «почти непрозрачного» окна: 254 из 255 — глазом не отличить, но трекеры перекрытия Chrome/Firefox такое окно
+/// не считают закрывающим (только альфу 255), и браузер под Murmur продолжает рисовать — трансляция окна не замирает.
+#[cfg(windows)]
+const LAYERED_ALPHA: u8 = 254;
+#[cfg(windows)]
+static LAYERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Держать окно layered (альфа 254), пока `on`; winit пересобирает стили окна — проверяем каждый кадр (один GetWindowLongW).
+pub fn keep_layered(on: bool) {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongW, WS_EX_LAYERED,
+        };
+        let hwnd = HWND.load(Ordering::Relaxed);
+        if hwnd == 0 || (!on && !LAYERED.load(Ordering::Relaxed)) {
+            return;
+        }
+        let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+        unsafe {
+            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            let has = ex & WS_EX_LAYERED as i32 != 0;
+            if on && !has {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED as i32);
+                SetLayeredWindowAttributes(hwnd, 0, LAYERED_ALPHA, LWA_ALPHA);
+                if !LAYERED.swap(true, Ordering::Relaxed) {
+                    log::info!("окно: layered (альфа {LAYERED_ALPHA}) — пока идёт трансляция окна");
+                }
+            } else if !on {
+                if has {
+                    SetWindowLongW(hwnd, GWL_EXSTYLE, ex & !(WS_EX_LAYERED as i32));
+                }
+                LAYERED.store(false, Ordering::Relaxed);
+                log::info!("окно: обычное");
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = on;
+}
+
 /// Перекрасить рамку окна под текущую тему (вызывать при смене темы; на полном экране рамки нет).
 pub fn apply_border() {
     #[cfg(windows)]

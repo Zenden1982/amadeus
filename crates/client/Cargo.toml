@@ -57,6 +57,10 @@ Section "-RemoveAmadeus"
 SectionEnd
 '''
 
+[features]
+# Сборка «с отладкой» для владельца: подробные логи трансляции/сети (capture_win::diag).
+diag = ["capture-win/diag"]
+
 [dependencies]
 proto = { path = "../proto" }
 capture-win = { path = "../capture-win" }

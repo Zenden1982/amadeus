@@ -61,6 +61,9 @@ fn main() -> eframe::Result {
         log::info!("Murmur уже запущен — показываю его окно");
         return Ok(());
     }
+    if capture_win::diag::on() {
+        log::info!("ДИАГ: диагностический режим — подробные логи трансляции и сети раз в секунду");
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -69,7 +72,7 @@ fn main() -> eframe::Result {
         .expect("tokio runtime");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Murmur")
+            .with_title(if capture_win::diag::on() { "Murmur · диагностика" } else { "Murmur" })
             // своя рамка и заголовок — frame.rs
             .with_decorations(false)
             .with_inner_size([1120.0, 700.0])

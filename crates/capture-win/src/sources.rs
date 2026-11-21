@@ -9,15 +9,17 @@ use std::mem::size_of;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    GetDC, GetMonitorInfoW, HALFTONE, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, ReleaseDC,
-    SRCCOPY, SelectObject, SetStretchBltMode, StretchBlt,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRectRgn, DIB_RGB_COLORS,
+    DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, HALFTONE, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, NULLREGION,
+    RGN_DIFF, ReleaseDC, SRCCOPY, SelectObject, SetStretchBltMode, StretchBlt,
 };
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DI_NORMAL, DrawIconEx, GCLP_HICON, GCLP_HICONSM, GW_OWNER, GWL_EXSTYLE, GetClassLongPtrW, GetClassNameW, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, HICON, ICON_BIG, ICON_SMALL2, IsIconic, IsWindow, SMTO_ABORTIFHUNG,
+    DI_NORMAL, DrawIconEx, GCLP_HICON, GCLP_HICONSM, GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GetClassLongPtrW, GetClassNameW,
+    GetLayeredWindowAttributes, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect, HICON, ICON_BIG, ICON_SMALL2,
+    IsIconic, IsWindow, IsWindowVisible, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, LWA_COLORKEY, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SMTO_ABORTIFHUNG, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     SendMessageTimeoutW, WM_GETICON, WS_EX_APPWINDOW,
 };
 use windows_capture::monitor::Monitor;
@@ -55,6 +57,71 @@ impl SourceId {
             SourceId::Window(h) => unsafe { IsIconic(hwnd(h)).as_bool() },
             SourceId::Monitor(_) => false,
         }
+    }
+
+    /// Окно целиком закрыто другими непрозрачными окнами (или ушло за край экрана). Так же считают Chrome и Firefox:
+    /// такое окно они перестают рисовать, и WGC не присылает новых кадров. Полупрозрачные (layered с альфой < 255)
+    /// и «прозрачные для мыши» окна не считаются — их не считают и браузеры.
+    pub fn is_occluded(&self) -> bool {
+        match *self {
+            SourceId::Window(h) => window_occluded(hwnd(h)),
+            SourceId::Monitor(_) => false,
+        }
+    }
+}
+
+/// Перекрывает ли окно то, что под ним, так же, как это видит трекер перекрытия браузеров.
+fn covers_like_browser(h: HWND) -> bool {
+    if !unsafe { IsWindowVisible(h) }.as_bool() || unsafe { IsIconic(h) }.as_bool() || is_cloaked(h) {
+        return false;
+    }
+    let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) } as u32;
+    if ex & WS_EX_TRANSPARENT.0 != 0 {
+        return false;
+    }
+    if ex & WS_EX_LAYERED.0 != 0 {
+        let (mut alpha, mut flags) = (0u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+        if unsafe { GetLayeredWindowAttributes(h, None, Some(&raw mut alpha), Some(&raw mut flags)) }.is_err() {
+            return false; // UpdateLayeredWindow — попиксельная прозрачность
+        }
+        if flags.0 & LWA_COLORKEY.0 != 0 || (flags.0 & LWA_ALPHA.0 != 0 && alpha < 255) {
+            return false;
+        }
+    }
+    true
+}
+
+fn window_occluded(target: HWND) -> bool {
+    let r = frame_bounds(target);
+    if r.right <= r.left || r.bottom <= r.top {
+        return false;
+    }
+    unsafe {
+        // Видимая на экранах часть окна: пересечение с виртуальным экраном.
+        let (vx, vy) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+        let (vw, vh) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+        let rgn = CreateRectRgn(r.left.max(vx), r.top.max(vy), r.right.min(vx + vw), r.bottom.min(vy + vh));
+        let mut occluded = false;
+        let mut w = GetWindow(target, GW_HWNDPREV).unwrap_or_default();
+        let mut guard = 0;
+        while !w.is_invalid() && guard < 2000 {
+            guard += 1;
+            if covers_like_browser(w) {
+                let b = frame_bounds(w);
+                if b.right > b.left && b.bottom > b.top {
+                    let cut = CreateRectRgn(b.left, b.top, b.right, b.bottom);
+                    let kind = CombineRgn(Some(rgn), Some(rgn), Some(cut), RGN_DIFF);
+                    let _ = DeleteObject(cut.into());
+                    if kind == NULLREGION {
+                        occluded = true;
+                        break;
+                    }
+                }
+            }
+            w = GetWindow(w, GW_HWNDPREV).unwrap_or_default();
+        }
+        let _ = DeleteObject(rgn.into());
+        occluded
     }
 }
 

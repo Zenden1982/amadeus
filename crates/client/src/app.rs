@@ -848,6 +848,8 @@ impl App {
         }
         #[allow(unused_mut)]
         let mut vs = self.voice.snapshot();
+        // Стримим окно — своё окно «почти непрозрачное», чтобы браузер под ним не считал себя перекрытым и не замирал.
+        crate::frame::keep_layered(vs.stream.as_ref().is_some_and(|s| s.source.is_window()));
         #[cfg(debug_assertions)]
         if std::env::var_os("AMADEUS_DEMO").is_some() {
             let watching = std::mem::take(&mut vs.watching);
@@ -1453,8 +1455,18 @@ impl App {
                     let vr = fit_rect(rect, f.size);
                     egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).corner_radius(radius).paint_at(ui, vr);
                     self.mark_view(&p.identity, vr, ui.ctx().pixels_per_point());
-                    if f.stale {
-                        chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Нет новых кадров — стример свернул окно или пропала связь", ph::HOURGLASS), ON_VIDEO_MUTED);
+                    // Стример сам сообщает, почему картинка стоит; иначе — догадка по отсутствию кадров.
+                    match vs.stream_paused.get(&p.identity) {
+                        Some(voice::StreamPause::Minimized) => {
+                            chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Стример свернул окно — картинка на паузе", ph::EYE_SLASH), ON_VIDEO);
+                        }
+                        Some(voice::StreamPause::Hidden) => {
+                            chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Окно стримера закрыто другим окном — картинка на паузе", ph::EYE_SLASH), ON_VIDEO);
+                        }
+                        None if f.stale => {
+                            chip(&painter, rect.center(), Align2::CENTER_CENTER, &format!("{}  Нет новых кадров — пропала связь со стримером", ph::HOURGLASS), ON_VIDEO_MUTED);
+                        }
+                        None => {}
                     }
                     if big && hovered && f.fps > 0.0 {
                         chip(&painter, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, &format!("{}×{} · {:.0} к/с", f.size[0], f.size[1], f.fps), ON_VIDEO_MUTED);
@@ -2808,8 +2820,14 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 // right_to_left родитель — порядок обратный
+                if s.viewers > 0 {
+                    ui.label(RichText::new(format!("{} {}", egui_phosphor::regular::EYE, s.viewers)).size(12.5).color(t::p().text_muted))
+                        .on_hover_text("Сколько человек смотрят");
+                }
                 if s.minimized {
                     ui.label(RichText::new("окно свёрнуто").size(12.5).color(t::p().danger_text));
+                } else if s.hidden {
+                    ui.label(RichText::new("окно закрыто другим — у зрителей стоп-кадр").size(12.5).color(t::p().danger_text));
                 } else if s.fps > 0.0 {
                     ui.label(RichText::new(format!("{:.0} к/с · {:.1} Мбит/с", s.fps, s.kbps / 1000.0)).size(12.5).color(t::p().text_muted));
                 }

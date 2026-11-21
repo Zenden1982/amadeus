@@ -6,7 +6,7 @@
 //! картинка вписывается в кадр с полями (энкодер не пересоздаётся).
 
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -27,7 +27,7 @@ use windows::core::{GUID, IInspectable, Interface, PWSTR};
 use windows_capture::graphics_capture_api::GraphicsCaptureApi;
 use windows_capture::settings::GraphicsCaptureItemType;
 
-use crate::capture::{CaptureConfig, Event, target_size};
+use crate::capture::{CaptureConfig, Event, OCCLUSION_CHECK, STALL, target_size};
 use crate::sources::SourceId;
 
 const MF_E_TRANSFORM_NEED_MORE_INPUT: i32 = 0xC00D6D72u32 as i32;
@@ -368,6 +368,10 @@ struct MfEncoder {
     fps: u32,
     max_bitrate: u32,
     name: String,
+    /// Диагностика: что вышло из энкодера (кадры, ключевые, байты) с прошлой строки лога.
+    out_frames: AtomicU32,
+    out_keys: AtomicU32,
+    out_bytes: AtomicU64,
 }
 
 impl MfEncoder {
@@ -499,6 +503,9 @@ impl MfEncoder {
                 fps,
                 max_bitrate: bitrate,
                 name: name.to_string(),
+                out_frames: AtomicU32::new(0),
+                out_keys: AtomicU32::new(0),
+                out_bytes: AtomicU64::new(0),
             })
         }
     }
@@ -599,6 +606,11 @@ impl MfEncoder {
             let mut len = 0u32;
             mb.Lock(&mut p, None, Some(&mut len)).map_err(e("Lock"))?;
             let data = std::slice::from_raw_parts(p, len as usize);
+            self.out_frames.fetch_add(1, Ordering::Relaxed);
+            self.out_bytes.fetch_add(len as u64, Ordering::Relaxed);
+            if key {
+                self.out_keys.fetch_add(1, Ordering::Relaxed);
+            }
             if key && !has_nal(data, 7) && !self.seq_header.is_empty() {
                 let mut v = Vec::with_capacity(self.seq_header.len() + data.len());
                 v.extend_from_slice(&self.seq_header);
@@ -692,6 +704,9 @@ struct Shared {
     minimized: AtomicBool,
     min_interval: Duration,
     frames: AtomicU32,
+    /// Диагностика: живые кадры и повторы с прошлой строки лога.
+    diag_frames: AtomicU32,
+    repeats: AtomicU32,
     /// Размер энкодера и желаемый размер по живым кадрам: (размер, с какого момента, уже сообщили).
     enc_size: (u32, u32),
     want_size: Mutex<Option<WantSize>>,
@@ -748,6 +763,8 @@ impl HwCapture {
             minimized: AtomicBool::new(false),
             min_interval: Duration::from_micros(1_000_000 / fps as u64 * 85 / 100),
             frames: AtomicU32::new(0),
+            diag_frames: AtomicU32::new(0),
+            repeats: AtomicU32::new(0),
             enc_size: (w, h),
             want_size: Mutex::new(None),
         });
@@ -837,8 +854,16 @@ impl HwCapture {
                         return Ok(());
                     }
                 };
-                *shared.last.lock().unwrap() = (Some(Sx(nv12.clone())), Instant::now());
+                {
+                    let mut last = shared.last.lock().unwrap();
+                    let gap = last.1.elapsed();
+                    if crate::diag::on() && last.0.is_some() && gap >= Duration::from_millis(400) {
+                        log::info!("ДИАГ захват: живых кадров не было {} мс", gap.as_millis());
+                    }
+                    *last = (Some(Sx(nv12.clone())), Instant::now());
+                }
                 shared.frames.fetch_add(1, Ordering::Relaxed);
+                shared.diag_frames.fetch_add(1, Ordering::Relaxed);
                 shared.enc.push(nv12, now_us(), shared.sink.as_ref());
                 Ok(())
             }))
@@ -911,6 +936,10 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
     let mut last_repeat = Instant::now();
     let mut stat_at = Instant::now();
     let mut min_check = Instant::now();
+    let mut hidden = false;
+    let mut occl_check = Instant::now();
+    let mut diag_at = Instant::now();
+    let mut screen = crate::diag::ScreenWatch::default();
     while !shared.stop.load(Ordering::Relaxed) {
         std::thread::sleep(POLL);
         if shared.closed.load(Ordering::Relaxed) || (source.is_window() && !source.is_alive()) {
@@ -938,6 +967,15 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
         }
         let minimized = shared.minimized.load(Ordering::Relaxed);
         let idle = shared.last.lock().unwrap().1.elapsed();
+        if source.is_window() && occl_check.elapsed() >= OCCLUSION_CHECK {
+            occl_check = Instant::now();
+            let h = !minimized && idle >= STALL && source.is_occluded();
+            if h != hidden {
+                hidden = h;
+                log::info!("захват: окно {}", if h { "перекрыто — новых кадров нет" } else { "снова присылает кадры" });
+                shared.sink.event(Event::Hidden(h));
+            }
+        }
         let key_wanted = shared.sink.take_keyframe_request();
         if key_wanted {
             shared.enc.force_key.store(true, Ordering::Relaxed);
@@ -953,7 +991,28 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
             };
             if let Some(t) = tex {
                 shared.enc.push(t, now_us(), shared.sink.as_ref());
+                shared.repeats.fetch_add(1, Ordering::Relaxed);
             }
+        }
+        if crate::diag::on() && diag_at.elapsed() >= Duration::from_secs(1) {
+            let dt = diag_at.elapsed().as_secs_f64();
+            diag_at = Instant::now();
+            let live = shared.diag_frames.swap(0, Ordering::Relaxed);
+            let rep = shared.repeats.swap(0, Ordering::Relaxed);
+            let out = shared.enc.out_frames.swap(0, Ordering::Relaxed);
+            let keys = shared.enc.out_keys.swap(0, Ordering::Relaxed);
+            let kbps = shared.enc.out_bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1000.0 / dt;
+            let (occ, chg) = match source {
+                SourceId::Window(h) => (if source.is_occluded() { "да" } else { "нет" }, screen.changed(h)),
+                SourceId::Monitor(_) => ("—", "—"),
+            };
+            log::info!(
+                "ДИАГ захват: живых {live}, повторов {rep}, из энкодера {out} (ключевых {keys}, {kbps:.0} кбит/с, цель {} кбит/с), без кадров {} мс, свёрнуто {}, перекрыто {occ}, экран под окном меняется {chg}, в фокусе «{}»",
+                shared.enc.bitrate.load(Ordering::Relaxed) / 1000,
+                idle.as_millis(),
+                if minimized { "да" } else { "нет" },
+                crate::diag::foreground_title()
+            );
         }
         if stat_at.elapsed() >= Duration::from_secs(10) {
             let n = shared.frames.swap(0, Ordering::Relaxed);

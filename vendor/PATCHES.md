@@ -36,6 +36,13 @@
 выхода из программы (повторное выключение при инициализированной записи — «Attempt to set Windows AEC with recording
 already initialized»). Эхоподавление теперь только программное AEC3 (48 кГц).
 
+## AdmProxy::Terminate() не закрывает устройства (2026-11-21)
+`webrtc-sys/src/adm_proxy.cpp`: `Terminate()` только останавливает запись/воспроизведение, sub-ADM терминирует лишь деструктор.
+Когда закрывалась последняя комната, где ты был один, WebRTC уничтожал движок голоса и звал `adm->Terminate()`, а прокси
+закрывал платформенный ADM Windows навсегда (`Init()` у прокси — no-op). При следующем входе: «Unable to set playout device»,
+«Failed to initialize recording», 0 исходящих пакетов и тишина в динамиках — «голос завис после смены канала/сервера».
+Проверка: `cargo run -p client --example rejoin` (вход → 5 с → выход ×3; до патча раунды 1–2 — 0 пакетов).
+
 ## Удалено из webrtc-sys
 - `src/lazy_load_deps_for/` (4,6 МБ) — нужен только для Linux-сборки desktop_capturer. Для сборки под Linux вернуть
   из оригинального крейта.

@@ -27,6 +27,31 @@ use crate::video::VideoHub;
 const PTT_RELEASE_DELAY: Duration = Duration::from_millis(180);
 const TICK: Duration = Duration::from_millis(80);
 const STATS_EVERY: Duration = Duration::from_secs(2);
+/// Служебное сообщение стримера зрителям: почему картинка на паузе («minimized» / «hidden» / «live»).
+const STREAM_STATE_TOPIC: &str = "murmur.stream-state";
+/// Зритель — стримеру: «1» начал смотреть, «0» перестал (для звука и счётчика зрителей).
+const WATCH_TOPIC: &str = "murmur.watch";
+/// Пока пауза — повторять (для тех, кто зашёл позже).
+const STREAM_STATE_RESEND: Duration = Duration::from_secs(3);
+
+/// Почему у стримера стоп-кадр (сообщает сам стример).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamPause {
+    /// Окно свёрнуто.
+    Minimized,
+    /// Окно закрыто другими окнами, и программа перестала его рисовать (браузеры так делают).
+    Hidden,
+}
+
+impl StreamPause {
+    fn wire(p: Option<StreamPause>) -> &'static [u8] {
+        match p {
+            Some(StreamPause::Minimized) => b"minimized",
+            Some(StreamPause::Hidden) => b"hidden",
+            None => b"live",
+        }
+    }
+}
 /// Паузы между попытками вернуться в канал после разрыва.
 const REJOIN_BACKOFF: [u64; 6] = [1, 2, 3, 5, 10, 15];
 
@@ -117,6 +142,8 @@ pub struct VoiceState {
     pub watching: Vec<String>,
     /// Метрики для оверлея F3 (только пока он открыт и мы в канале).
     pub metrics: Option<crate::metrics::Metrics>,
+    /// Стримеры, у которых картинка на паузе, и почему (identity → причина).
+    pub stream_paused: HashMap<String, StreamPause>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +152,10 @@ pub struct StreamInfo {
     pub title: String,
     pub preset: Preset,
     pub minimized: bool,
+    /// Окно перекрыто другими и не присылает кадров — у зрителей стоп-кадр.
+    pub hidden: bool,
+    /// Сколько человек сейчас смотрят.
+    pub viewers: usize,
     /// Размер отправляемого видео.
     pub size: Option<(u32, u32)>,
     /// Чем кодируется: «NVIDIA H.264 Encoder MFT (видеокарта)» / «OpenH264 (процессор)».
@@ -165,6 +196,7 @@ impl Default for VoiceState {
             stream_notice: None,
             watching: Vec::new(),
             metrics: None,
+            stream_paused: HashMap::new(),
         }
     }
 }
@@ -246,6 +278,8 @@ pub fn spawn(
         metrics_at: None,
         dump_stats: false,
         force_relay: std::env::var("AMADEUS_FORCE_RELAY").is_ok_and(|v| v == "1"),
+        pause_sent: None,
+        viewers: HashSet::new(),
     };
     rt.spawn(engine.run(rx, cap_rx));
     VoiceHandle { tx, state }
@@ -295,6 +329,10 @@ struct Engine {
     dump_stats: bool,
     /// `AMADEUS_FORCE_RELAY=1`: только через TURN (проверка запасного пути).
     force_relay: bool,
+    /// Что последним сообщили зрителям о паузе своей трансляции и когда.
+    pause_sent: Option<(Option<StreamPause>, Instant)>,
+    /// Кто смотрит свою трансляцию (по сообщениям зрителей).
+    viewers: HashSet<String>,
 }
 
 /// Идущая трансляция. Захват и источник живут дольше публикации: при переподключении
@@ -681,6 +719,15 @@ impl Engine {
 
         if self.audio.is_none() {
             self.init_audio();
+        } else {
+            // Новая комната после выхода — новый движок голоса WebRTC, а он при создании ставит системные
+            // устройства (adm_helpers::Init). Выбранные в настройках — заново.
+            if let Some(inp) = self.prefs.input.clone() {
+                self.apply_input(Some(inp));
+            }
+            if let Some(out) = self.prefs.output.clone() {
+                self.apply_output(Some(out));
+            }
         }
         self.apply_processing();
         let mic = self.publish_mic(&room.local_participant()).await;
@@ -747,7 +794,10 @@ impl Engine {
         self.last_peers.clear();
         self.counters = Default::default();
         self.metrics_at = None;
-        self.set(|s| s.metrics = None);
+        self.set(|s| {
+            s.metrics = None;
+            s.stream_paused.clear();
+        });
     }
 
     fn lost_connection(&mut self, why: &str) {
@@ -775,9 +825,58 @@ impl Engine {
                 log::info!("+ {} ({})", p.name(), p.identity());
                 self.play(Sound::JoinOther);
                 self.refresh_peers(false);
+                // новичку — сразу, если картинка на паузе
+                if self.pause_sent.is_some_and(|(p, _)| p.is_some()) {
+                    self.pause_sent = None;
+                    self.send_stream_state().await;
+                }
+            }
+            RoomEvent::DataReceived { payload, topic, participant, .. }
+                if topic.as_deref() == Some(WATCH_TOPIC) =>
+            {
+                if let Some(p) = participant
+                    && self.stream.is_some()
+                {
+                    let id = p.identity().as_str().to_string();
+                    let on = payload.as_slice() == b"1";
+                    let changed = if on { self.viewers.insert(id.clone()) } else { self.viewers.remove(&id) };
+                    if changed {
+                        log::info!("зритель {id}: {}", if on { "смотрит" } else { "перестал" });
+                        self.play(if on { Sound::ViewerJoin } else { Sound::ViewerLeave });
+                        self.publish_viewers();
+                    }
+                }
+            }
+            RoomEvent::DataReceived { payload, topic, participant, .. } => {
+                if topic.as_deref() == Some(STREAM_STATE_TOPIC)
+                    && let Some(p) = participant
+                {
+                    let id = p.identity().as_str().to_string();
+                    let pause = match payload.as_slice() {
+                        b"minimized" => Some(StreamPause::Minimized),
+                        b"hidden" => Some(StreamPause::Hidden),
+                        _ => None,
+                    };
+                    self.set(|s| {
+                        let prev = match pause {
+                            Some(v) => s.stream_paused.insert(id.clone(), v),
+                            None => s.stream_paused.remove(&id),
+                        };
+                        if prev != pause {
+                            log::info!("трансляция {id}: {pause:?}");
+                        }
+                    });
+                }
             }
             RoomEvent::ParticipantDisconnected(p) => {
                 log::info!("- {} ({})", p.name(), p.identity());
+                self.set(|s| {
+                    s.stream_paused.remove(p.identity().as_str());
+                });
+                if self.viewers.remove(p.identity().as_str()) {
+                    self.play(Sound::ViewerLeave);
+                    self.publish_viewers();
+                }
                 self.set_watching(p.identity().as_str(), false);
                 self.play(Sound::LeaveOther);
                 self.refresh_peers(false);
@@ -807,13 +906,20 @@ impl Engine {
             }
             RoomEvent::TrackPublished { publication, participant } => {
                 log::info!("{} опубликовал {:?}", participant.identity(), publication.source());
+                if publication.source() == TrackSource::Screenshare {
+                    self.play(Sound::StreamStart);
+                }
                 self.sync_subscription(participant.identity().as_str(), &publication);
                 self.refresh_peers(false);
             }
             RoomEvent::TrackUnpublished { publication, participant } => {
                 log::info!("{} снял {:?}", participant.identity(), publication.source());
                 if publication.source() == TrackSource::Screenshare {
+                    self.play(Sound::StreamStop);
                     // Трансляция закончилась — перестаём «смотреть» (новую стример покажет заново, как в Discord).
+                    self.set(|s| {
+                        s.stream_paused.remove(participant.identity().as_str());
+                    });
                     self.set_watching(participant.identity().as_str(), false);
                 }
                 self.refresh_peers(false);
@@ -873,7 +979,10 @@ impl Engine {
             }
         if self.room.is_some() {
             self.refresh_peers(true);
-            let every = if self.overlay { Duration::from_secs(1) } else { STATS_EVERY };
+            if self.pause_sent.is_some_and(|(p, at)| p.is_some() && at.elapsed() >= STREAM_STATE_RESEND) {
+                self.send_stream_state().await;
+            }
+            let every = if self.overlay || capture_win::diag::on() { Duration::from_secs(1) } else { STATS_EVERY };
             if self.last_stats.elapsed() >= every {
                 self.last_stats = Instant::now();
                 self.update_rtt().await;
@@ -907,6 +1016,19 @@ impl Engine {
                 s.metrics = Some(m);
             });
         }
+        if capture_win::diag::on() {
+            let all: Vec<RtcStats> = stats.publisher_stats.iter().chain(stats.subscriber_stats.iter()).cloned().collect();
+            let mut prev = crate::metrics::Counters::default();
+            let m = crate::metrics::collect(&all, &HashMap::new(), &mut prev, 1.0, self.force_relay);
+            log::info!(
+                "ДИАГ сеть: путь {:?} → {} {}, RTT {:?} мс, доступно на отправку {:?} кбит/с",
+                m.conn.path,
+                m.conn.remote,
+                m.conn.turn,
+                m.conn.rtt_ms.map(|v| v.round()),
+                m.conn.out_kbps_avail.map(|v| v.round())
+            );
+        }
         self.update_video_stats(&stats.publisher_stats);
         // Одна PeerConnection на всё (LiveKit 1.13) — входящие тоже в publisher_stats.
         self.log_inbound_video(&stats.subscriber_stats);
@@ -936,6 +1058,8 @@ impl Engine {
             return;
         }
         self.set(|s| s.stream_notice = None);
+        // Смена пресета/источника идущей трансляции — без звуков «конец» + «начало».
+        let restarting = self.stream.is_some();
         // Тот же пресет — меняем только источник: трек и публикация остаются (зрители не переподключаются).
         if let Some(mut st) = self.stream.take() {
             if st.preset == preset && st.publication.is_some() {
@@ -969,7 +1093,7 @@ impl Engine {
                 }
             }
             self.stream = Some(st);
-            self.stop_stream().await;
+            self.stop_stream_quiet().await;
         }
 
         self.generation += 1;
@@ -993,6 +1117,9 @@ impl Engine {
             }
         };
         log::info!("трансляция: {source:?} «{title}», {preset:?}, энкодер {}", started.encoder);
+        if !restarting {
+            self.play(Sound::StreamStart);
+        }
         let backend = started.encoder.clone();
         self.stream = Some(Streaming {
             capture: Some(started.capture),
@@ -1009,6 +1136,8 @@ impl Engine {
                 title,
                 preset,
                 minimized: false,
+                hidden: false,
+                viewers: 0,
                 size: None,
                 backend,
                 encoder: None,
@@ -1070,6 +1199,13 @@ impl Engine {
     }
 
     async fn stop_stream(&mut self) {
+        if self.stream.is_some() {
+            self.play(Sound::StreamStop);
+        }
+        self.stop_stream_quiet().await;
+    }
+
+    async fn stop_stream_quiet(&mut self) {
         let Some(mut st) = self.stream.take() else { return };
         if let Some(c) = st.capture.take() {
             tokio::task::block_in_place(|| c.stop());
@@ -1090,6 +1226,8 @@ impl Engine {
             }
         self.generation += 1; // события остановленного захвата больше не нужны
         self.last_video_bytes = None;
+        self.pause_sent = None;
+        self.viewers.clear();
         log::info!("трансляция остановлена");
         self.set(|s| s.stream = None);
         self.refresh_peers(false);
@@ -1138,11 +1276,22 @@ impl Engine {
                 }
             }),
             CapEvent::SizeChanged { width, height } => self.resize_hw_capture(width, height).await,
-            CapEvent::Minimized(m) => self.set(|s| {
-                if let Some(i) = &mut s.stream {
-                    i.minimized = m;
-                }
-            }),
+            CapEvent::Minimized(m) => {
+                self.set(|s| {
+                    if let Some(i) = &mut s.stream {
+                        i.minimized = m;
+                    }
+                });
+                self.send_stream_state().await;
+            }
+            CapEvent::Hidden(h) => {
+                self.set(|s| {
+                    if let Some(i) = &mut s.stream {
+                        i.hidden = h;
+                    }
+                });
+                self.send_stream_state().await;
+            }
             CapEvent::Closed => {
                 self.stop_stream().await;
                 self.set(|s| s.stream_notice = Some("Окно закрыто — трансляция остановлена.".into()));
@@ -1151,6 +1300,40 @@ impl Engine {
                 self.stop_stream().await;
                 self.set(|s| s.stream_notice = Some(format!("Трансляция остановлена: {e}")));
             }
+        }
+    }
+
+    /// Сообщить зрителям, на паузе ли картинка своей трансляции (только при смене; пока пауза — повторять).
+    async fn send_stream_state(&mut self) {
+        let pause = {
+            let s = self.state.lock().unwrap();
+            s.stream.as_ref().and_then(|i| {
+                if i.minimized {
+                    Some(StreamPause::Minimized)
+                } else if i.hidden {
+                    Some(StreamPause::Hidden)
+                } else {
+                    None
+                }
+            })
+        };
+        let due = match self.pause_sent {
+            None => pause.is_some(),
+            Some((p, at)) => p != pause || (pause.is_some() && at.elapsed() >= STREAM_STATE_RESEND),
+        };
+        let Some((room, _)) = &self.room else { return };
+        if !due {
+            return;
+        }
+        self.pause_sent = Some((pause, Instant::now()));
+        let packet = livekit::DataPacket {
+            payload: StreamPause::wire(pause).to_vec(),
+            topic: Some(STREAM_STATE_TOPIC.into()),
+            reliable: true,
+            ..Default::default()
+        };
+        if let Err(e) = room.local_participant().publish_data(packet).await {
+            log::warn!("состояние трансляции зрителям: {e}");
         }
     }
 
@@ -1195,6 +1378,40 @@ impl Engine {
 
     /// Входящее видео трансляций — в лог (раз в 5 опросов).
     fn log_inbound_video(&self, stats: &[RtcStats]) {
+        if capture_win::diag::on() {
+            for s in stats {
+                if let RtcStats::InboundRtp(i) = s
+                    && i.stream.kind == "video"
+                {
+                    let jb = if i.inbound.jitter_buffer_emitted_count > 0 {
+                        i.inbound.jitter_buffer_delay * 1000.0 / i.inbound.jitter_buffer_emitted_count as f64
+                    } else {
+                        0.0
+                    };
+                    log::info!(
+                        "ДИАГ зритель видео: {}×{} {:.0} к/с, принято кадров {} / декодировано {} / выброшено {}, ключевых {}, потеряно пакетов {} из {}, NACK {}, PLI {}, FIR {}, заморозок {} ({:.1} с), пауз {} ({:.1} с), буфер {:.0} мс",
+                        i.inbound.frame_width,
+                        i.inbound.frame_height,
+                        i.inbound.frames_per_second,
+                        i.inbound.frames_received,
+                        i.inbound.frames_decoded,
+                        i.inbound.frames_dropped,
+                        i.inbound.key_frames_decoded,
+                        i.received.packets_lost,
+                        i.received.packets_received,
+                        i.inbound.nack_count,
+                        i.inbound.pli_count,
+                        i.inbound.fir_count,
+                        i.inbound.freeze_count,
+                        i.inbound.total_freeze_duration,
+                        i.inbound.pause_count,
+                        i.inbound.total_pause_duration,
+                        jb
+                    );
+                }
+            }
+            return;
+        }
         if !self.stats_n.is_multiple_of(5) {
             return;
         }
@@ -1258,7 +1475,7 @@ impl Engine {
         } else {
             0.0
         };
-        if self.stats_n % 5 == 1 {
+        if self.stats_n % 5 == 1 || capture_win::diag::on() {
             log::info!(
                 "видео: энкодер {enc:?}, {}×{} {fps:.0} к/с, {kbps:.0} кбит/с, цель {:.0} кбит/с, кодирование {enc_ms:.1} мс/кадр, ограничение {lim}, NACK {}, PLI {}, потери у SFU {:?}",
                 o.outbound.frame_width,
@@ -1378,6 +1595,30 @@ impl Engine {
         }
         self.sync_subscriptions();
         self.publish_watching();
+        // Стримеру — для звука «зритель пришёл/ушёл» и счётчика зрителей.
+        if let Some((room, _)) = &self.room {
+            let lp = room.local_participant();
+            let packet = livekit::DataPacket {
+                payload: if on { b"1".to_vec() } else { b"0".to_vec() },
+                topic: Some(WATCH_TOPIC.into()),
+                reliable: true,
+                destination_identities: vec![identity.to_string().into()],
+            };
+            tokio::spawn(async move {
+                if let Err(e) = lp.publish_data(packet).await {
+                    log::warn!("сообщение стримеру: {e}");
+                }
+            });
+        }
+    }
+
+    fn publish_viewers(&self) {
+        let n = self.viewers.len();
+        self.set(|s| {
+            if let Some(i) = &mut s.stream {
+                i.viewers = n;
+            }
+        });
     }
 
     /// Выход из канала / другой канал: ничего не смотрим.
