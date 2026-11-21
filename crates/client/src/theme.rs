@@ -293,16 +293,35 @@ fn apply_visuals(ctx: &egui::Context, pal: &'static Palette) {
 
 /// Цвет аватара — стабильный по имени (палитра из макета).
 pub fn avatar_color(name: &str) -> Color32 {
-    const P: [Color32; 6] = [
-        Color32::from_rgb(0x5B, 0x8C, 0xFF),
-        Color32::from_rgb(0xF2, 0x99, 0x4A),
-        Color32::from_rgb(0x2F, 0xB5, 0x9A),
-        Color32::from_rgb(0xB5, 0x65, 0xE6),
-        Color32::from_rgb(0xE5, 0x48, 0x8D),
-        Color32::from_rgb(0xD9, 0xA4, 0x1E),
+    avatar_colors(name).1
+}
+
+/// Цвета аватара-буквы по хешу ника: (фон, буква). Светлая тема — мягкий фон и тёмная буква того же тона,
+/// тёмная — тёмный фон и светлая буква. Буква годится и как цвет имени в чате (читается на фоне темы).
+pub fn avatar_colors(name: &str) -> (Color32, Color32) {
+    const fn c(hex: u32) -> Color32 {
+        Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+    }
+    // янтарь, розовый, бирюза, индиго, зелёный, роза
+    const LIGHT_P: [(Color32, Color32); 6] = [
+        (c(0xFEF3C7), c(0x92400E)),
+        (c(0xFCE7F3), c(0x9D174D)),
+        (c(0xCCFBF1), c(0x115E59)),
+        (c(0xE0E7FF), c(0x3730A3)),
+        (c(0xDCFCE7), c(0x166534)),
+        (c(0xFFE4E6), c(0x9F1239)),
+    ];
+    const DARK_P: [(Color32, Color32); 6] = [
+        (c(0x4A3A12), c(0xFCD34D)),
+        (c(0x4A1D36), c(0xF9A8D4)),
+        (c(0x134E4A), c(0x5EEAD4)),
+        (c(0x2B2F66), c(0xA5B4FC)),
+        (c(0x14432A), c(0x86EFAC)),
+        (c(0x4C1D26), c(0xFDA4AF)),
     ];
     let h = name.to_lowercase().bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
-    P[(h % P.len() as u32) as usize]
+    let set = if std::ptr::eq(p(), &LIGHT) { &LIGHT_P } else { &DARK_P };
+    set[(h % set.len() as u32) as usize]
 }
 
 /// Знак Murmur «волна-кот» (пакет бренда, `logo/murmur-logo.svg`, 64×64): линия звука вырастает в M с ушами, две точки-глаза.
@@ -319,6 +338,7 @@ const MARK: Mark = Mark {
     eye_r: 3.0,
     width: 5.5,
 };
+#[allow(dead_code)]
 const MARK_SMALL: Mark = Mark {
     line: &[(9.0, 52.0), (15.0, 12.0), (25.0, 25.0), (39.0, 25.0), (49.0, 12.0), (55.0, 52.0)],
     eyes: [(26.0, 38.0), (38.0, 38.0)],
@@ -327,6 +347,7 @@ const MARK_SMALL: Mark = Mark {
 };
 
 /// Точки знака в `rect` (квадрат): ломаная, глаза, толщина линии, радиус глаз.
+#[allow(dead_code)]
 pub fn logo_points(rect: Rect) -> (Vec<Pos2>, [Pos2; 2], f32, f32) {
     let m = if rect.width() <= 24.0 { &MARK_SMALL } else { &MARK };
     let s = rect.width() / 64.0;
@@ -344,7 +365,8 @@ fn round_stroke(painter: &egui::Painter, pts: &[Pos2], width: f32, color: Color3
     }
 }
 
-/// Знак Murmur. `lit` = false — приглушённый (неактивное окно).
+/// Знак Murmur. `lit` = false — приглушённый (неактивное окно). Сейчас экраны берут надпись или кота; знак — на будущее.
+#[allow(dead_code)]
 pub fn logo(painter: &egui::Painter, rect: Rect, lit: bool) {
     let (line, eyes, width, eye_r) = logo_points(rect);
     let color = if lit { self::p().accent } else { self::p().text_muted };
@@ -384,17 +406,36 @@ fn mur_strokes() -> Vec<Vec<(f32, f32)>> {
     ]
 }
 
+/// «Живая» поза знака в заголовке: `blink` 0..1 — глаза сжаты по вертикали, `ears` — уши выше на столько px экрана.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct MarkPose {
+    pub blink: f32,
+    pub ears: f32,
+}
+
 /// Знак + надпись «murmur» (лого бренда): первая половина — цвет текста, вторая — акцент («мур-мур»).
 /// `left_top` — левый верхний угол, `height` — высота (вся надпись — 222 × 42 в единицах макета). Возвращает занятый прямоугольник.
 pub fn paint_lockup(painter: &egui::Painter, left_top: Pos2, height: f32, lit: bool) -> Rect {
+    paint_lockup_pose(painter, left_top, height, lit, MarkPose::default())
+}
+
+/// То же с позой знака (кот в заголовке окна моргает и шевелит ушами).
+pub fn paint_lockup_pose(painter: &egui::Painter, left_top: Pos2, height: f32, lit: bool, pose: MarkPose) -> Rect {
     let s = height / 42.0;
     let map = |(x, y): (f32, f32)| pos2(left_top.x + x * s, left_top.y + (y - 10.0) * s);
     let pal = self::p();
     let (mark_c, first_c, second_c) = if lit { (pal.accent, pal.text, pal.accent) } else { (pal.text_muted, pal.text_muted, pal.text_muted) };
-    let line: Vec<Pos2> = MARK.line.iter().map(|&q| map(q)).collect();
+    // кончики ушей — вершины знака с наименьшим y
+    let ear_y = MARK.line.iter().map(|q| q.1).fold(f32::MAX, f32::min);
+    let line: Vec<Pos2> = MARK.line.iter().map(|&q| map(q) - vec2(0.0, if q.1 == ear_y { pose.ears } else { 0.0 })).collect();
     round_stroke(painter, &line, MARK.width * s, mark_c);
+    let r = MARK.eye_r * s;
     for e in MARK.eyes {
-        painter.circle_filled(map(e), MARK.eye_r * s, mark_c);
+        if pose.blink > 0.01 {
+            painter.add(egui::Shape::ellipse_filled(map(e), vec2(r, (r * (1.0 - 0.85 * pose.blink)).max(0.6)), mark_c));
+        } else {
+            painter.circle_filled(map(e), r, mark_c);
+        }
     }
     for (dx, color) in [(74.0, first_c), (149.0, second_c)] {
         for stroke in mur_strokes() {

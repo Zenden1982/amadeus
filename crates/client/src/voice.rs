@@ -126,6 +126,10 @@ pub struct VoiceState {
     pub peers: Vec<Peer>,
     /// RTT до LiveKit, секунды.
     pub rtt: Option<f64>,
+    /// Джиттер аудио (наибольший из входящего и того, что сервер видит от нас), секунды.
+    pub jitter: Option<f64>,
+    /// Доля потерянных пакетов аудио 0..1 за последний замер.
+    pub loss: Option<f64>,
     pub self_muted: bool,
     pub deafened: bool,
     pub ptt_enabled: bool,
@@ -184,6 +188,8 @@ impl Default for VoiceState {
             channel: None,
             peers: Vec::new(),
             rtt: None,
+            jitter: None,
+            loss: None,
             self_muted: false,
             deafened: false,
             ptt_enabled: false,
@@ -269,6 +275,7 @@ pub fn spawn(
         generation: 0,
         last_video_bytes: None,
         stats_n: 0,
+        audio_counts: (0, 0),
         video,
         watching: HashSet::new(),
         receivers: HashMap::new(),
@@ -313,6 +320,8 @@ struct Engine {
     generation: u64,
     last_video_bytes: Option<(u64, Instant)>,
     stats_n: u64,
+    /// Входящее аудио (потеряно, принято) на прошлом замере — для доли потерь.
+    audio_counts: (i64, u64),
     /// Текстуры просматриваемых трансляций (общие с UI).
     video: VideoHub,
     /// Чьи трансляции смотрим; переживает переподключение, сбрасывается при выходе/смене канала.
@@ -578,6 +587,8 @@ impl Engine {
                     s.channel = None;
                     s.peers.clear();
                     s.rtt = None;
+                    s.jitter = None;
+                    s.loss = None;
                 });
             }
             Cmd::SetSelfMuted(m) => {
@@ -674,7 +685,10 @@ impl Engine {
             s.channel = Some(ch.clone());
             s.peers.clear();
             s.rtt = None;
+            s.jitter = None;
+            s.loss = None;
         });
+        self.audio_counts = (0, 0);
         match self.try_join(&ch).await {
             Ok(()) => {
                 self.rejoin = None;
@@ -816,6 +830,8 @@ impl Engine {
         self.set(|s| {
             s.conn = Conn::Rejoining { attempt };
             s.rtt = None;
+            s.jitter = None;
+            s.loss = None;
         });
     }
 
@@ -1045,10 +1061,41 @@ impl Engine {
                 _ => None,
             })
             .reduce(f64::min);
+        let (jitter, loss) = self.audio_quality(stats.publisher_stats.iter().chain(stats.subscriber_stats.iter()));
         if rtt.is_some() {
-            log::debug!("rtt {rtt:?}");
+            log::debug!("rtt {rtt:?}, джиттер {jitter:?}, потери {loss:?}");
             self.set(|s| s.rtt = rtt);
         }
+        self.set(|s| {
+            s.jitter = jitter;
+            s.loss = loss;
+        });
+    }
+
+    /// Джиттер и потери аудио для пинга в заголовке: наш звук глазами сервера (remote-inbound) и входящий звук других.
+    fn audio_quality<'a>(&mut self, stats: impl Iterator<Item = &'a RtcStats>) -> (Option<f64>, Option<f64>) {
+        let (mut jitter, mut loss) = (None::<f64>, None::<f64>);
+        let (mut lost, mut recv) = (0i64, 0u64);
+        for s in stats {
+            match s {
+                RtcStats::RemoteInboundRtp(r) if r.stream.kind == "audio" => {
+                    jitter = Some(jitter.unwrap_or(0.0).max(r.received.jitter));
+                    loss = Some(loss.unwrap_or(0.0).max(r.remote_inbound.fraction_lost.clamp(0.0, 1.0)));
+                }
+                RtcStats::InboundRtp(i) if i.stream.kind == "audio" => {
+                    jitter = Some(jitter.unwrap_or(0.0).max(i.received.jitter));
+                    lost += i.received.packets_lost;
+                    recv += i.received.packets_received;
+                }
+                _ => {}
+            }
+        }
+        let (pl, pr) = std::mem::replace(&mut self.audio_counts, (lost, recv));
+        let (dl, dr) = ((lost - pl).max(0) as f64, recv.saturating_sub(pr) as f64);
+        if pr > 0 && dl + dr > 0.0 {
+            loss = Some(loss.unwrap_or(0.0).max(dl / (dl + dr)));
+        }
+        (jitter, loss)
     }
 
     // ---------------------------------------------------------------- трансляция

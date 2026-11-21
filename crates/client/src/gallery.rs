@@ -4,7 +4,7 @@ use eframe::egui::{self, CornerRadius, Frame, Margin, Rect, RichText, Sense, Ui,
 use egui_phosphor::regular as ph;
 
 use crate::config::ThemePref;
-use crate::kit::{self, ButtonKind, DockStyle, IconState, MascotPose, Notice, PeerBadge};
+use crate::kit::{self, ButtonKind, Cat, DockStyle, IconState, Notice, PeerBadge};
 use crate::theme as t;
 
 #[derive(Default)]
@@ -18,6 +18,7 @@ pub struct GalleryState {
     pick: u8,
     modal: bool,
     notice_closed: bool,
+    seg: u8,
 }
 
 fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
@@ -44,8 +45,11 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
     egui::CentralPanel::default().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::same(24))).show(ui, |ui| {
         let mut area = egui::ScrollArea::vertical();
         // Отладка: AMADEUS_GALLERY=2 — сразу прокрутить к нижней половине (для скриншота).
-        if std::env::var("AMADEUS_GALLERY").as_deref() == Ok("2") {
-            area = area.vertical_scroll_offset(1000.0);
+        // AMADEUS_GALLERY=<число больше 2> — прокрутить на столько px.
+        match std::env::var("AMADEUS_GALLERY").ok().and_then(|v| v.parse::<f32>().ok()) {
+            Some(2.0) => area = area.vertical_scroll_offset(1000.0),
+            Some(px) if px > 2.0 => area = area.vertical_scroll_offset(px),
+            _ => {}
         }
         area.show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -77,6 +81,15 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
                     kit::dock_button(ui, ph::HEADPHONES, "Звук", DockStyle::Normal);
                     kit::dock_button(ui, ph::SPEAKER_SLASH, "Звук", DockStyle::Off);
                     kit::dock_button(ui, ph::PHONE_X, "Отключиться", DockStyle::Leave);
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    kit::dock_icon(ui, ph::MICROPHONE, DockStyle::Live, "Микрофон");
+                    kit::dock_icon(ui, ph::MICROPHONE_SLASH, DockStyle::Off, "Микрофон выкл.");
+                    kit::dock_icon(ui, ph::HEADPHONES, DockStyle::Normal, "Звук");
+                    kit::dock_icon(ui, ph::MONITOR_ARROW_UP, DockStyle::Normal, "Экран");
+                    ui.add_space(20.0);
+                    kit::segmented(ui, &mut s.seg, &[(0, "Все"), (1, "Важные"), (2, "Выкл.")]);
                 });
             });
             section(ui, "Поля и переключатели", |ui| {
@@ -141,10 +154,25 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width().min(760.0), 170.0), Sense::hover());
                 let w = (row.width() - 24.0) / 3.0;
                 let r = |i: f32| Rect::from_min_size(row.min + vec2(i * (w + 12.0), 0.0), vec2(w, row.height()));
-                kit::peer_tile(ui, r(0.0), &kit::PeerTile { who: kit::AvatarInput { name: "mayuri", texture: None }, name: "mayuri", speaking: 0.8, badge: PeerBadge::None, is_local: false, streaming: false });
-                kit::peer_tile(ui, r(1.0), &kit::PeerTile { who: kit::AvatarInput { name: "tester", texture: None }, name: "Тестер", speaking: 0.0, badge: PeerBadge::None, is_local: true, streaming: true });
+                let tile = |name: &'static str, speaking: f32, mic_off: bool, is_local: bool, streaming: bool| kit::PeerTile {
+                    who: kit::AvatarInput { name, texture: None },
+                    name,
+                    speaking,
+                    wave_phase: Some(5.0),
+                    mic_off,
+                    is_local,
+                    streaming,
+                };
+                kit::peer_tile(ui, r(0.0), &tile("mayuri", 0.8, false, false, false));
+                kit::peer_tile(ui, r(1.0), &tile("tester", 0.0, false, true, true));
                 kit::stream_tile_frame(ui.painter(), r(2.0), false);
                 kit::live_badge(ui.painter(), r(2.0).right_top() + vec2(-12.0, 12.0));
+                ui.add_space(12.0);
+                let (row, _) = ui.allocate_exact_size(vec2(760.0, 68.0), Sense::hover());
+                let c = |i: f32| Rect::from_min_size(row.min + vec2(i * 212.0, 0.0), kit::COMPACT_TILE);
+                kit::peer_tile_compact(ui, c(0.0), &tile("mayuri", 0.7, false, false, false));
+                kit::peer_tile_compact(ui, c(1.0), &tile("daru", 0.0, true, false, false));
+                kit::peer_tile_compact(ui, c(2.0), &tile("kurisu", 0.0, false, false, true));
             });
             section(ui, "Уведомления и окна", |ui| {
                 if !s.notice_closed && kit::notice(ui, Notice::Error, "Не удалось войти в канал: нет связи с сервером голоса.", true) {
@@ -162,8 +190,25 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
                     kit::spinner(ui, 24.0);
                 });
             });
-            section(ui, "Пустое состояние", |ui| {
-                kit::empty_state(ui, MascotPose::Sleeping, "Тут тихо", "Позови своих", Some("Пригласить"));
+            section(ui, "Кот в пустых и системных состояниях", |ui| {
+                let cats = [
+                    (Cat::Sleep, "Тут тихо", "Позови своих — они появятся здесь"),
+                    (Cat::Hello, "Привет!", "Как тебя называть?"),
+                    (Cat::Loading, "Подключаемся…", "Ещё секунду"),
+                    (Cat::Offline, "Связь пропала", "Пробуем переподключиться"),
+                    (Cat::NotFound, "Приглашение не найдено", "Ссылка устарела или в ней опечатка"),
+                    (Cat::Peek, "Сообщений пока нет", "Напиши первым"),
+                    (Cat::Success, "Сервер готов!", "Скопируй ссылку и позови друзей"),
+                    (Cat::NoMic, "Не слышим микрофон", "Проверь подключение и доступ в Windows"),
+                ];
+                for row in cats.chunks(4) {
+                    ui.columns(4, |cols| {
+                        for (col, (cat, title, sub)) in cols.iter_mut().zip(row) {
+                            kit::cat_state(col, *cat, title, sub, None);
+                        }
+                    });
+                    ui.add_space(16.0);
+                }
             });
         });
     });

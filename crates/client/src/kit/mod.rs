@@ -5,18 +5,22 @@
 #![allow(dead_code, unused_imports)]
 
 mod buttons;
+mod cat;
 mod inputs;
 mod lists;
 mod misc;
 mod overlays;
 mod people;
+mod wave;
 
 pub use buttons::*;
+pub use cat::*;
 pub use inputs::*;
 pub use lists::*;
 pub use misc::*;
 pub use overlays::*;
 pub use people::*;
+pub use wave::*;
 
 /// Скругление панелей, карточек, плиток.
 pub const R_CARD: u8 = 14;

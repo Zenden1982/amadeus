@@ -1,6 +1,7 @@
 //! Amadeus — голосовой чат для своих. Десктоп-клиент (Windows).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod anim;
 mod api;
 mod app;
 mod channels_ui;

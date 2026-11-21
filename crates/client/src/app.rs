@@ -172,6 +172,8 @@ pub struct App {
     legacy_error: Option<String>,
     #[cfg(debug_assertions)]
     gallery: crate::gallery::GalleryState,
+    /// Кто был в моём канале на прошлом кадре (канал, identity) — кто-то зашёл → уши кота в заголовке.
+    prev_peers: (Option<i64>, Vec<String>),
 }
 
 impl App {
@@ -189,6 +191,8 @@ impl App {
             Ok("light") => settings.theme = ThemePref::Light,
             _ => {}
         }
+        crate::anim::apply(&settings);
+        crate::sounds::set_volume(if settings.sounds { settings.sounds_volume } else { 0 });
         let api = Api::new(&settings.server_url, settings.session_token.clone());
         let repaint: Arc<dyn Fn() + Send + Sync> = {
             let ctx = ctx.clone();
@@ -298,6 +302,7 @@ impl App {
             legacy_error: None,
             #[cfg(debug_assertions)]
             gallery: Default::default(),
+            prev_peers: (None, Vec::new()),
         };
         if app.tray.is_some() && std::env::args().any(|a| a == desktop::ARG_TRAY) {
             // eframe показывает окно после первого кадра; свёрнутое — покажется только в панели задач,
@@ -639,17 +644,15 @@ impl App {
     fn ui_boot(&mut self, ui: &mut Ui) {
         egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
             let r = ui.max_rect();
-            t::logo(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 50.0), vec2(96.0, 96.0)), true);
-            let area = Rect::from_center_size(r.center() + vec2(0.0, 60.0), vec2(460.0, 140.0));
+            let area = Rect::from_center_size(r.center(), vec2(460.0, 320.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| match &self.boot_error {
                 None => {
-                    ui.vertical_centered(|ui| {
-                        kit::spinner(ui, 24.0);
-                        ui.label(RichText::new("Подключаемся к серверу…").size(15.0).color(t::p().text_muted));
-                    });
+                    kit::cat_state(ui, kit::Cat::Loading, "Подключаемся…", "Ещё секунду", None);
                 }
                 Some(err) => {
                     let err = err.clone();
+                    kit::cat_state(ui, kit::Cat::Offline, "Связь пропала", "Пробуем переподключиться", None);
+                    ui.add_space(12.0);
                     kit::notice(ui, kit::Notice::Error, &err, false);
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
@@ -683,7 +686,7 @@ impl App {
             t::wordmark(ui, 40.0);
             // кот и подпись — по центру левой части
             let mid = r.center().y;
-            kit::mascot(&p, Rect::from_center_size(pos2(r.left() + 90.0, mid - 70.0), vec2(180.0, 180.0)), kit::MascotPose::Sitting);
+            kit::cat_figure(&p, Rect::from_center_size(pos2(r.left() + 90.0, mid - 80.0), vec2(186.0, 150.0)), kit::Cat::Hello);
             p.text(pos2(r.left(), mid + 40.0), Align2::LEFT_TOP, "Созвоны, игры и учёба —\nсо своими.", t::xbold(30.0), t::p().text);
             p.text(
                 pos2(r.left(), mid + 136.0),
@@ -864,6 +867,7 @@ impl App {
         self.chat.ensure_stream();
         self.leave_if_gone(&vs);
         self.sync_focus(ui, &vs);
+        self.speech_repaint(ui, &vs);
         if self.fullscreen {
             self.ui_fullscreen(ui, &vs);
             self.report_views(&vs);
@@ -902,6 +906,28 @@ impl App {
             self.ui_picker(ui, &vs);
         }
         self.report_views(&vs);
+    }
+
+    /// Перерисовка ради волны речи: до 30 к/с и только пока кто-то говорит (или волна ещё затухает), окно на виду
+    /// и анимации не выключены. Никто не говорит — лишних кадров нет. Плюс: кто-то зашёл в канал — уши кота в заголовке.
+    fn speech_repaint(&mut self, ui: &Ui, vs: &VoiceState) {
+        let ch = vs.channel.as_ref().filter(|_| vs.conn == Conn::Connected).map(|c| c.id);
+        let ids: Vec<String> = if ch.is_some() { vs.peers.iter().map(|p| p.identity.clone()).collect() } else { Vec::new() };
+        if ch.is_some() && ch == self.prev_peers.0 && ids.iter().any(|id| !self.prev_peers.1.contains(id)) {
+            crate::frame::perk_ears();
+        }
+        self.prev_peers = (ch, ids);
+        if ch.is_none() || !crate::anim::important(ui.ctx()) {
+            return;
+        }
+        let ctx = ui.ctx();
+        let live = vs.peers.iter().any(|p| {
+            let fading = ctx.data(|d| d.get_temp::<(f32, f64)>(Id::new(("speech-amp", p.identity.as_str())))).is_some_and(|(v, _)| v > 0.0);
+            (p.speaking && !p.mic_muted) || fading
+        });
+        if live {
+            ctx.request_repaint_after(crate::anim::SPEECH_FRAME);
+        }
     }
 
     /// Отладка: AMADEUS_AUTOWATCH=1 — сразу смотреть каждую трансляцию в канале
@@ -1255,7 +1281,7 @@ impl App {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(rtt) = vs.rtt {
-                            ping_box(ui, rtt);
+                            ping_box(ui, rtt, vs.jitter, vs.loss);
                         }
                         if let Some(s) = &vs.stream {
                             ui.add_space(4.0);
@@ -1266,68 +1292,80 @@ impl App {
             });
     }
 
+    /// Нижняя панель управления — плавающая капсула по центру: круглые кнопки-значки (микрофон, звук, экран),
+    /// разделитель и «Отключиться» (единственная красная кнопка).
     fn ui_dock(&mut self, ui: &mut Ui, vs: &VoiceState) {
         egui::Panel::bottom("dock")
-            .exact_size(76.0)
+            .exact_size(84.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t::p().surface))
+            .frame(Frame::new().fill(t::p().bg))
             .show(ui, |ui| {
                 let r = ui.max_rect();
-                ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, t::p().border));
                 let in_room = vs.channel.is_some();
                 let mic_off = vs.self_muted || vs.deafened;
-                let (mic_icon, mic_style) = if mic_off {
-                    (ph::MICROPHONE_SLASH, DockStyle::Off)
+                let (mic_icon, mic_style, mic_tip) = if mic_off {
+                    (ph::MICROPHONE_SLASH, DockStyle::Off, "Включить микрофон")
                 } else if vs.transmitting {
-                    (ph::MICROPHONE, DockStyle::Live)
+                    (ph::MICROPHONE, DockStyle::Live, "Выключить микрофон")
                 } else {
-                    (ph::MICROPHONE, DockStyle::Normal)
+                    (ph::MICROPHONE, DockStyle::Normal, "Выключить микрофон")
                 };
-                let snd_style = if vs.deafened { DockStyle::Off } else { DockStyle::Normal };
-                let snd_icon = if vs.deafened { ph::SPEAKER_SLASH } else { ph::HEADPHONES };
+                let (snd_icon, snd_style, snd_tip) =
+                    if vs.deafened { (ph::SPEAKER_SLASH, DockStyle::Off, "Включить звук") } else { (ph::HEADPHONES, DockStyle::Normal, "Выключить звук") };
                 let key = ptt::key_name(self.settings.ptt_key);
-                // ширина ряда — чтобы отцентровать
                 let can_stream = in_room && vs.conn == Conn::Connected;
                 let streaming = vs.stream.is_some();
-                let est = 140.0
-                    + 110.0
-                    + if vs.ptt_enabled { 150.0 + key.len() as f32 * 7.0 } else { 0.0 }
-                    + if in_room { 170.0 } else { 0.0 }
-                    + if streaming { 300.0 } else if can_stream { 120.0 } else { 0.0 };
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(((r.width() - est) / 2.0).max(12.0));
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    if kit::dock_button(ui, mic_icon, "Микрофон", mic_style).clicked() {
-                        self.voice.send(Cmd::SetSelfMuted(!mic_off));
-                    }
-                    if kit::dock_button(ui, snd_icon, "Звук", snd_style).clicked() {
-                        self.voice.send(Cmd::SetDeafened(!vs.deafened));
-                    }
-                    if vs.ptt_enabled {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Рация: держите").size(13.0).color(t::p().text_muted));
-                        kit::keycap(ui, &key);
-                        ui.add_space(4.0);
-                    }
-                    if streaming {
-                        if kit::dock_button(ui, ph::MONITOR_ARROW_UP, "Остановить", DockStyle::Live)
-                            .on_hover_text("Остановить трансляцию")
-                            .clicked()
-                        {
-                            self.voice.send(Cmd::StopStream);
+
+                // ширина содержимого — чтобы капсула облегала кнопки
+                const GAP: f32 = 10.0;
+                let measure = |text: &str, font: egui::FontId| ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER).size().x;
+                let icons = 2 + usize::from(streaming || can_stream) + usize::from(streaming);
+                let mut w = icons as f32 * 46.0 + (icons - 1) as f32 * GAP;
+                if vs.ptt_enabled {
+                    w += GAP + measure("Рация", t::font(13.0)) + 6.0 + measure(&key, t::bold(13.0)) + 18.0;
+                }
+                if in_room {
+                    w += GAP + 1.0 + GAP + 18.0 + 20.0 + 9.0 + measure("Отключиться", t::bold(14.0)) + 20.0;
+                }
+                let cap = Rect::from_center_size(pos2(r.center().x, r.center().y - 4.0), vec2(w + 16.0, 62.0));
+                let p = t::p();
+                let painter = ui.painter();
+                painter.add(egui::epaint::Shadow { offset: [0, 4], blur: 18, spread: 0, color: Color32::from_black_alpha(36) }.as_shape(cap, CornerRadius::same(30)));
+                painter.rect(cap, CornerRadius::same(30), p.bg, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(cap.shrink2(vec2(8.0, 8.0))), |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = GAP;
+                        if kit::dock_icon(ui, mic_icon, mic_style, mic_tip).clicked() {
+                            self.voice.send(Cmd::SetSelfMuted(!mic_off));
                         }
-                        if kit::dock_button(ui, ph::SWAP, "Сменить", DockStyle::Normal).on_hover_text("Сменить окно или экран без остановки").clicked() {
+                        if kit::dock_icon(ui, snd_icon, snd_style, snd_tip).clicked() {
+                            self.voice.send(Cmd::SetDeafened(!vs.deafened));
+                        }
+                        if streaming {
+                            if kit::dock_icon(ui, ph::MONITOR_ARROW_UP, DockStyle::Live, "Остановить трансляцию").clicked() {
+                                self.voice.send(Cmd::StopStream);
+                            }
+                            if kit::dock_icon(ui, ph::SWAP, DockStyle::Normal, "Сменить окно или экран без остановки").clicked() {
+                                self.open_picker(vs);
+                            }
+                        } else if can_stream && kit::dock_icon(ui, ph::MONITOR_ARROW_UP, DockStyle::Normal, "Показать окно или экран").clicked() {
                             self.open_picker(vs);
                         }
-                    } else if can_stream
-                        && kit::dock_button(ui, ph::MONITOR_ARROW_UP, "Экран", DockStyle::Normal).on_hover_text("Показать окно или экран").clicked()
-                    {
-                        self.open_picker(vs);
-                    }
-                    if in_room && kit::dock_button(ui, ph::PHONE_X, "Отключиться", DockStyle::Leave).clicked() {
-                        self.voice.send(Cmd::Leave);
-                    }
+                        if vs.ptt_enabled {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.label(RichText::new("Рация").size(13.0).color(p.text_muted));
+                            kit::keycap(ui, &key).on_hover_text(format!("Режим рации: микрофон включён, пока держите {key}"));
+                            ui.spacing_mut().item_spacing.x = GAP;
+                        }
+                        if in_room {
+                            let (sep, _) = ui.allocate_exact_size(vec2(1.0, 30.0), Sense::hover());
+                            ui.painter().vline(sep.center().x, sep.y_range(), Stroke::new(1.0, p.border));
+                            if kit::dock_button(ui, ph::PHONE_X, "Отключиться", DockStyle::Leave).clicked() {
+                                self.voice.send(Cmd::Leave);
+                            }
+                        }
+                    });
                 });
             });
     }
@@ -1337,39 +1375,38 @@ impl App {
         match (&vs.conn, &vs.channel) {
             (Conn::Failed(msg), _) => {
                 let msg = msg.clone();
-                let area = Rect::from_center_size(r.center(), vec2(520.0, 140.0));
+                let area = Rect::from_center_size(r.center(), vec2(520.0, 260.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
-                    kit::notice(ui, kit::Notice::Error, &msg, false);
-                    ui.add_space(12.0);
-                    ui.vertical_centered(|ui| {
-                        if let Some(ch) = vs.channel.clone()
-                            && kit::button(ui, kit::ButtonKind::Primary, "Повторить", Some(egui_phosphor::fill::ARROW_CLOCKWISE)).clicked()
-                        {
-                            self.voice.send(Cmd::Join(ch));
-                        }
-                    });
+                    let retry = vs.channel.is_some().then_some("Повторить");
+                    if kit::cat_state(ui, kit::Cat::Offline, "Связь пропала", &msg, retry)
+                        && let Some(ch) = vs.channel.clone()
+                    {
+                        self.voice.send(Cmd::Join(ch));
+                    }
                 });
             }
+            // Ближайшее состояние кота — «выглядывает» (отдельного «выберите канал» в пакете нет).
             (_, None) => {
-                let area = Rect::from_center_size(r.center(), vec2(420.0, 260.0));
+                let area = Rect::from_center_size(r.center(), vec2(420.0, 200.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
-                    kit::empty_state(ui, kit::MascotPose::Sitting, "Выберите голосовой канал", "Список каналов — слева", None);
+                    kit::cat_state(ui, kit::Cat::Peek, "Выберите голосовой канал", "Список каналов — слева", None);
                 });
             }
             (Conn::Connecting, Some(_)) if vs.peers.is_empty() => {
-                let area = Rect::from_center_size(r.center(), vec2(240.0, 80.0));
+                let area = Rect::from_center_size(r.center(), vec2(420.0, 200.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
-                    ui.vertical_centered(|ui| {
-                        kit::spinner(ui, 28.0);
-                        ui.label(RichText::new("Подключаемся…").font(t::semibold(15.0)).color(t::p().text_muted));
-                    });
+                    kit::cat_state(ui, kit::Cat::Loading, "Подключаемся…", "Ещё секунду", None);
                 });
             }
-            // В канале только я и никто не стримит — «Тут тихо».
+            // В канале только я и никто не стримит — «Тут тихо» (или «нет микрофона», если в системе нет ни одного).
             (Conn::Connected, Some(_)) if vs.peers.len() <= 1 && !vs.peers.iter().any(|p| p.streaming) => {
-                let area = Rect::from_center_size(r.center(), vec2(420.0, 300.0));
+                let area = Rect::from_center_size(r.center(), vec2(420.0, 200.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
-                    kit::empty_state(ui, kit::MascotPose::Sleeping, "Тут тихо", "Позови своих — они появятся здесь", None);
+                    if vs.inputs.is_empty() {
+                        kit::cat_state(ui, kit::Cat::NoMic, "Не слышим микрофон", "Проверь подключение и доступ в Windows", None);
+                    } else {
+                        kit::cat_state(ui, kit::Cat::Sleep, "Тут тихо", "Позови своих — они появятся здесь", None);
+                    }
                 });
             }
             _ => self.ui_room(ui, vs),
@@ -1384,6 +1421,26 @@ impl App {
         items.extend(vs.peers.iter().map(Item::Person));
         let focused = self.focus.as_ref().and_then(|f| items.iter().position(|i| matches!(i, Item::Stream(p) if &p.identity == f)));
         let Some(fi) = focused else {
+            if crate::anim::compact_tiles() {
+                // Компактно: трансляции сеткой сверху, люди — плитками 200×68 рядами снизу (или по центру, если трансляций нет).
+                let (streams, people): (Vec<Item>, Vec<Item>) = items.iter().partition(|i| matches!(i, Item::Stream(_)));
+                let rects = compact_rects(r, people.len(), 12.0);
+                let block_top = rects.iter().map(|x| x.top()).fold(r.bottom(), f32::min);
+                let rects = if streams.is_empty() {
+                    let dy = (r.top() + r.bottom() - block_top - r.bottom()) / 2.0;
+                    rects.into_iter().map(|x| x.translate(vec2(0.0, dy))).collect()
+                } else {
+                    rects
+                };
+                let stream_area = Rect::from_min_max(r.min, pos2(r.right(), block_top - 16.0));
+                for (item, rect) in streams.iter().zip(grid_rects(stream_area, streams.len(), 9.0 / 16.0, 16.0)) {
+                    self.ui_item(ui, rect, *item, vs, false);
+                }
+                for (item, rect) in people.iter().zip(rects) {
+                    self.ui_item(ui, rect, *item, vs, false);
+                }
+                return;
+            }
             let aspect = if items.iter().any(|i| matches!(i, Item::Stream(_))) { 9.0 / 16.0 } else { 0.8 };
             for (item, rect) in items.iter().zip(grid_rects(r, items.len(), aspect, 16.0)) {
                 self.ui_item(ui, rect, *item, vs, false);
@@ -1413,8 +1470,8 @@ impl App {
         match item {
             Item::Person(p) => {
                 let resp = ui.interact(rect, Id::new(("tile", &p.identity)), Sense::click());
-                let glow = speak_glow(ui, p);
-                tile(ui, rect, p, glow, &self.people);
+                let amp = speech_amp(ui, p);
+                tile(ui, rect, p, amp, &self.people);
                 if resp.clicked() && !p.is_local {
                     self.open_popup(p, resp.interact_pointer_pos().unwrap_or(rect.center()));
                 }
@@ -2128,18 +2185,6 @@ impl App {
         ui.add_space(18.0);
         ui.label(RichText::new("Приложение").font(t::bold(15.0)));
         ui.add_space(4.0);
-        toggle_row(ui, w, |ui| {
-            ui.label("Тема");
-        }, |ui| {
-            let mut pref = self.settings.theme;
-            let items: Vec<(ThemePref, String)> = ThemePref::ALL.iter().map(|v| (*v, v.label().to_string())).collect();
-            if kit::combo(ui, "theme-pref", &mut pref, &items, 190.0) && pref != self.settings.theme {
-                self.settings.theme = pref;
-                self.settings.save();
-                t::set_theme(ui.ctx(), pref);
-                crate::frame::apply_border();
-            }
-        });
         let installed = desktop::is_installed();
         let mut autostart = self.settings.autostart;
         toggle_row(ui, w, |ui| {
@@ -2195,6 +2240,98 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Настройки → «Внешний вид»: тема, анимации, индикатор речи, пинг, плитки, кот, звуки интерфейса.
+    fn ui_settings_look(&mut self, ui: &mut Ui, w: f32) {
+        use crate::config::{AnimPref, PingDisplay, SpeechIndicator};
+        ui.add_space(22.0);
+        ui.label(RichText::new("Внешний вид").font(t::xbold(20.0)));
+        ui.add_space(10.0);
+        let mut changed = false;
+
+        let mut theme = self.settings.theme;
+        toggle_row(ui, w, |ui| {
+            ui.label("Тема");
+        }, |ui| {
+            if kit::segmented(ui, &mut theme, &[(ThemePref::Light, "Светлая"), (ThemePref::Dark, "Тёмная"), (ThemePref::System, "Системная")]) {
+                self.settings.theme = theme;
+                changed = true;
+                t::set_theme(ui.ctx(), theme);
+                crate::frame::apply_border();
+            }
+        });
+        let mut anim = self.settings.animations_effective();
+        toggle_row(ui, w, |ui| {
+            ui.label("Анимации").on_hover_text("«Важные» — только волна речи и анимация подключения. «Выкл.» — всё статично.");
+        }, |ui| {
+            if kit::segmented(ui, &mut anim, &[(AnimPref::All, "Все"), (AnimPref::Important, "Важные"), (AnimPref::Off, "Выкл.")]) {
+                self.settings.animations = Some(anim);
+                changed = true;
+            }
+        });
+        for (text, tip, val) in [
+            ("Останавливать анимации в фоне", "Окно свёрнуто или не в фокусе (например, вы в игре) — украшения не рисуются", &mut self.settings.pause_anim_in_background),
+            ("Компактные плитки участников", "Небольшие плитки 200×68 вместо крупных", &mut self.settings.compact_tiles),
+            ("Живой кот в заголовке окна", "Моргает и шевелит ушами, когда кто-то заходит в канал", &mut self.settings.live_cat),
+        ] {
+            toggle_row(ui, w, |ui| {
+                ui.label(text).on_hover_text(tip);
+            }, |ui| {
+                changed |= kit::switch(ui, val).changed();
+            });
+        }
+        let mut speech = self.settings.speech_indicator;
+        toggle_row(ui, w, |ui| {
+            ui.label("Индикатор речи");
+        }, |ui| {
+            if kit::segmented(ui, &mut speech, &[(SpeechIndicator::Wave, "Волна"), (SpeechIndicator::Ring, "Кольцо")]) {
+                self.settings.speech_indicator = speech;
+                changed = true;
+            }
+        });
+        let mut ping = self.settings.ping_display;
+        toggle_row(ui, w, |ui| {
+            ui.label("Пинг в заголовке");
+        }, |ui| {
+            if kit::segmented(ui, &mut ping, &[(PingDisplay::WaveAndMs, "Волна и мс"), (PingDisplay::MsOnly, "Только мс"), (PingDisplay::Hidden, "Скрыть")]) {
+                self.settings.ping_display = ping;
+                changed = true;
+            }
+        });
+        let mut sounds = self.settings.sounds;
+        let mut volume = self.settings.sounds_volume as f32;
+        let mut sound_changed = false;
+        let mut sample = false;
+        toggle_row(ui, w, |ui| {
+            ui.label("Звуки интерфейса").on_hover_text("Вход и выход из канала, начало и конец трансляции, зрители");
+        }, |ui| {
+            sound_changed |= kit::switch(ui, &mut sounds).changed();
+            ui.add_space(10.0);
+            ui.label(RichText::new(format!("{:.0}", volume)).size(13.0).color(t::p().text_muted));
+            ui.add_enabled_ui(sounds, |ui| {
+                let r = kit::slider(ui, &mut volume, 0.0..=100.0, 150.0);
+                if r.changed() {
+                    sound_changed = true;
+                }
+                // при отпускании — образец звука новой громкости
+                sample = r.drag_stopped() || r.clicked();
+            });
+        });
+        if sound_changed {
+            self.settings.sounds = sounds;
+            self.settings.sounds_volume = volume.round() as u8;
+            crate::sounds::set_volume(if sounds { self.settings.sounds_volume } else { 0 });
+            self.voice.send(Cmd::SetSounds(sounds));
+            changed = true;
+        }
+        if sample {
+            crate::sounds::play(crate::sounds::Sound::JoinOther);
+        }
+        if changed {
+            self.settings.save();
+            crate::anim::apply(&self.settings);
+        }
     }
 
     fn open_settings(&mut self) {
@@ -2299,7 +2436,14 @@ impl App {
             .show(ui.ctx(), |ui| {
                 ui.set_width(556.0);
                 let w = 556.0;
-                egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 140.0).show(ui, |ui| {
+                #[allow(unused_mut)]
+                let mut area = egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 140.0);
+                // Отладка: AMADEUS_OPEN_SETTINGS=<px> — открыть настройки прокрученными (скриншоты).
+                #[cfg(debug_assertions)]
+                if let Some(px) = std::env::var("AMADEUS_OPEN_SETTINGS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|px| *px > 1.0) {
+                    area = area.vertical_scroll_offset(px);
+                }
+                area.show(ui, |ui| {
                     self.ui_settings_profile(ui, w);
                     ui.add_space(22.0);
                     ui.label(RichText::new("Голос и звук").font(t::xbold(20.0)));
@@ -2413,17 +2557,7 @@ impl App {
                             agc: self.settings.auto_gain,
                         });
                     }
-                    let mut sounds = self.settings.sounds;
-                    toggle_row(ui, w, |ui| {
-                        ui.label("Звуки входа и выхода");
-                    }, |ui| {
-                        if kit::switch(ui, &mut sounds).changed() {
-                            self.settings.sounds = sounds;
-                            self.settings.save();
-                            self.voice.send(Cmd::SetSounds(sounds));
-                        }
-                    });
-
+                    self.ui_settings_look(ui, w);
                     self.ui_settings_app(ui, w);
 
                     // аккаунт
@@ -2632,6 +2766,8 @@ impl eframe::App for App {
 /// Отладка вёрстки без сервера голоса: AMADEUS_DEMO=1 (только debug-сборка).
 #[cfg(debug_assertions)]
 fn demo_state(time: f64) -> VoiceState {
+    // AMADEUS_DEMO_TALK=0|1|2 — сколько человек говорит (по умолчанию 1: mayuri), для замеров CPU.
+    let talk: usize = std::env::var("AMADEUS_DEMO_TALK").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let peer = |id: &str, local: bool, speaking: bool, muted: bool| Peer {
         identity: id.into(),
         name: id.into(),
@@ -2654,8 +2790,8 @@ fn demo_state(time: f64) -> VoiceState {
         }),
         peers: vec![
             peer("tester", true, false, false),
-            peer("mayuri", false, true, false),
-            peer("kurisu", false, false, false),
+            peer("mayuri", false, talk >= 1, false),
+            peer("kurisu", false, talk >= 2, false),
             peer("daru", false, false, true),
         ],
         rtt: Some(0.037),
@@ -2703,6 +2839,23 @@ fn grid_rects(r: Rect, n: usize, aspect: f32, gap: f32) -> Vec<Rect> {
             let row_w = tw * in_row as f32 + gap * (in_row - 1) as f32;
             let left = r.left() + (r.width() - row_w) / 2.0;
             Rect::from_min_size(pos2(left + col as f32 * (tw + gap), top + row as f32 * (th + gap)), vec2(tw, th))
+        })
+        .collect()
+}
+
+/// Компактные плитки (200×68) рядами по центру, прижаты к низу `r`.
+fn compact_rects(r: Rect, n: usize, gap: f32) -> Vec<Rect> {
+    let size = kit::COMPACT_TILE;
+    let cols = (((r.width() + gap) / (size.x + gap)).floor() as usize).max(1);
+    let rows = n.div_ceil(cols);
+    let top = r.bottom() - rows as f32 * size.y - rows.saturating_sub(1) as f32 * gap;
+    (0..n)
+        .map(|i| {
+            let (row, col) = (i / cols, i % cols);
+            let in_row = if row == rows - 1 { n - row * cols } else { cols };
+            let row_w = size.x * in_row as f32 + gap * (in_row - 1) as f32;
+            let left = r.center().x - row_w / 2.0;
+            Rect::from_min_size(pos2(left + col as f32 * (size.x + gap), top + row as f32 * (size.y + gap)), size)
         })
         .collect()
 }
@@ -2772,40 +2925,69 @@ fn peer_name(people: &People, p: &Peer) -> String {
 pub(crate) fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-    let glow = speak_glow(ui, p);
+    let amp = speech_amp(ui, p);
+    let phase = wave_phase(ui);
     let painter = ui.painter();
     let c = pos2(rect.left() + 40.0 + 11.0, rect.center().y);
     let u = peer_user(people, p);
-    people.paint(painter, c, 11.0, &u, glow * 0.7, false);
-    let color = if glow > 0.05 { t::p().text } else { t::p().text_muted };
-    painter.text(pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, u.shown_name(), t::semibold(14.0), color);
+    // индикатор «Кольцо» (или анимации выключены) — обводка аватара; «Волна» — волна рядом с ником
+    people.paint(painter, c, 11.0, &u, if phase.is_none() { amp * 0.7 } else { 0.0 }, false);
+    let color = if amp > 0.02 { t::p().text } else { t::p().text_muted };
     let mut x = rect.right() - 12.0;
+    let mut icons_w = 0.0;
     if p.mic_muted {
-        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::p().danger);
+        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MICROPHONE_SLASH, t::icon_fill(14.0), t::p().text_faint);
         x -= 20.0;
+        icons_w += 20.0;
     }
     if p.streaming {
-        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::p().danger);
+        painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::p().accent);
+        icons_w += 20.0;
+    }
+    let name = painter.layout_no_wrap(u.shown_name().to_string(), t::semibold(14.0), color);
+    let name_w = name.size().x;
+    painter.galley(pos2(c.x + 19.0, c.y - name.size().y / 2.0), name, color);
+    if let (Some(phase), true) = (phase, amp > 0.02) {
+        let left = c.x + 19.0 + name_w + 8.0;
+        if left + 28.0 <= rect.right() - 12.0 - icons_w {
+            kit::wave(painter, pos2(left, c.y), 28.0, 1.0 + 4.0 * amp, phase, t::p().speaking, kit::WaveStyle::Solid);
+        }
     }
 }
 
-/// Плавное свечение говорящего (0..1) — «пульсирует в такт голосу».
-fn speak_glow(ui: &Ui, p: &Peer) -> f32 {
-    let target = if p.speaking && !p.mic_muted { (0.55 + p.level.clamp(0.0, 1.0) * 2.0).min(1.0) } else { 0.0 };
-    ui.ctx().animate_value_with_time(Id::new(("glow", &p.identity)), target, 0.12)
+/// Сглаженная громкость речи участника 0..1 (атака ~30 мс, спад ~200 мс); без анимаций — без сглаживания.
+fn speech_amp(ui: &Ui, p: &Peer) -> f32 {
+    let target = if p.speaking && !p.mic_muted { (0.35 + p.level.clamp(0.0, 1.0) * 2.5).min(1.0) } else { 0.0 };
+    if !crate::anim::important(ui.ctx()) {
+        return target;
+    }
+    crate::anim::smooth_level(ui.ctx(), &p.identity, target)
 }
 
-fn tile(ui: &Ui, rect: Rect, p: &Peer, glow: f32, people: &People) {
+/// Сдвиг волны речи (px): Some — индикатор «Волна» (бежит, пока анимации идут), None — «Кольцо».
+fn wave_phase(ui: &Ui) -> Option<f32> {
+    if !crate::anim::speech_wave() {
+        return None;
+    }
+    Some(if crate::anim::important(ui.ctx()) { (ui.input(|i| i.time) * 40.0 % 20.0) as f32 } else { 0.0 })
+}
+
+fn tile(ui: &Ui, rect: Rect, p: &Peer, amp: f32, people: &People) {
     let u = peer_user(people, p);
-    let badge = if p.mic_muted { kit::PeerBadge::MicOff } else { kit::PeerBadge::None };
-    kit::peer_tile(ui, rect, &kit::PeerTile {
+    let tile = kit::PeerTile {
         who: kit::AvatarInput { name: people::avatar_name(&u), texture: people.texture_of(&u) },
         name: u.shown_name(),
-        speaking: glow,
-        badge,
+        speaking: amp,
+        wave_phase: wave_phase(ui),
+        mic_off: p.mic_muted,
         is_local: p.is_local,
         streaming: p.streaming,
-    });
+    };
+    if rect.height() <= kit::COMPACT_TILE.y + 4.0 {
+        kit::peer_tile_compact(ui, rect, &tile);
+    } else {
+        kit::peer_tile(ui, rect, &tile);
+    }
 }
 
 /// Статус своей трансляции в шапке: источник, качество, факт к/с и битрейт, энкодер.
@@ -2879,30 +3061,92 @@ fn ping_level(rtt: f64) -> PingLevel {
     }
 }
 
-/// Пинг в шапке: «таблетка» с точкой качества и миллисекундами.
-fn ping_box(ui: &mut Ui, rtt: f64) {
+/// Джиттер выше этого — пинг-волна «дёргается» цветом предупреждения.
+const JITTER_BAD: f64 = 0.030;
+/// Потери выше этого — пунктир цветом опасности и подпись «потери».
+const LOSS_BAD: f64 = 0.02;
+
+/// Состояние связи для пинг-волны.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkState {
+    Fine,
+    Jitter,
+    Loss,
+}
+
+fn link_state(jitter: Option<f64>, loss: Option<f64>) -> LinkState {
+    if loss.is_some_and(|l| l > LOSS_BAD) {
+        LinkState::Loss
+    } else if jitter.is_some_and(|j| j > JITTER_BAD) {
+        LinkState::Jitter
+    } else {
+        LinkState::Fine
+    }
+}
+
+/// Пинг в шапке. «Волна и мс»: в норме — статичная тихая линия акцентом; джиттер — дёрганая линия цветом предупреждения
+/// (до 15 к/с, только при анимациях «Все»); потери — пунктир цветом опасности и «потери» вместо мс.
+/// «Только мс» — точка качества и миллисекунды; «Скрыть» — ничего.
+fn ping_box(ui: &mut Ui, rtt: f64, jitter: Option<f64>, loss: Option<f64>) {
+    use crate::config::PingDisplay;
+    let mode = crate::anim::ping();
+    if mode == PingDisplay::Hidden {
+        return;
+    }
     let p = t::p();
-    let color = match ping_level(rtt) {
-        PingLevel::Good => p.speaking,
-        PingLevel::Ok => Color32::from_rgb(0xE8, 0xA3, 0x3D),
-        PingLevel::Bad => p.danger,
-    };
+    let state = link_state(jitter, loss);
+    let tip = format!(
+        "Время до сервера голоса и обратно: {:.0} мс\nДжиттер: {}\nПотери: {}",
+        rtt * 1000.0,
+        jitter.map_or("—".into(), |j| format!("{:.0} мс", j * 1000.0)),
+        loss.map_or("—".into(), |l| format!("{:.1} %", l * 100.0)),
+    );
     Frame::new()
         .fill(p.surface_2)
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(255))
         .inner_margin(Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            // Родитель — right_to_left, поэтому порядок обратный: подпись, затем точка.
+            // Родитель — right_to_left, поэтому порядок обратный: подпись, затем значок.
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(RichText::new(format!("{:.0} мс", rtt * 1000.0)).font(t::bold(13.5)).color(p.text));
-                let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 4.0, color);
+                ui.spacing_mut().item_spacing.x = 7.0;
+                let (text, color) = match (mode, state) {
+                    (PingDisplay::WaveAndMs, LinkState::Loss) => ("потери".to_string(), p.danger_text),
+                    _ => (format!("{:.0} мс", rtt * 1000.0), p.text),
+                };
+                ui.label(RichText::new(text).font(t::bold(13.5)).color(color));
+                if mode == PingDisplay::MsOnly {
+                    let dot = match ping_level(rtt) {
+                        PingLevel::Good => p.speaking,
+                        PingLevel::Ok => p.warning,
+                        PingLevel::Bad => p.danger,
+                    };
+                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, dot);
+                    return;
+                }
+                let (r, _) = ui.allocate_exact_size(vec2(34.0, 14.0), Sense::hover());
+                let left = r.left_center();
+                match state {
+                    LinkState::Fine => kit::wave(ui.painter(), left, r.width(), 2.5, 0.0, p.accent, kit::WaveStyle::Solid),
+                    LinkState::Loss => kit::wave(ui.painter(), left, r.width(), 3.5, 0.0, p.danger, kit::WaveStyle::Dashed),
+                    LinkState::Jitter => {
+                        // «дёрганая» линия: каждый кадр (до 15 к/с) — случайные сдвиг и размах
+                        let (phase, amp) = if crate::anim::decor(ui.ctx()) {
+                            ui.ctx().request_repaint_after(crate::anim::PING_FRAME);
+                            let n = (ui.input(|i| i.time) * 15.0) as u64;
+                            let h = n.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 33;
+                            ((h % 20) as f32, 2.5 + (h % 7) as f32 * 0.5)
+                        } else {
+                            (0.0, 4.0)
+                        };
+                        kit::wave(ui.painter(), left, r.width(), amp, phase, p.warning, kit::WaveStyle::Solid);
+                    }
+                }
             });
         })
         .response
-        .on_hover_text(format!("Время до сервера голоса и обратно: {:.0} мс", rtt * 1000.0));
+        .on_hover_text(tip);
 }
 
 /// Выпадающий список устройств. Возвращает true, если выбор изменился.
@@ -2948,7 +3192,27 @@ fn toggle_row(ui: &mut Ui, w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnc
 
 #[cfg(test)]
 mod ping_tests {
-    use super::{PingLevel, ping_level};
+    use super::{LinkState, PingLevel, compact_rects, link_state, ping_level};
+    use eframe::egui::{Rect, pos2, vec2};
+
+    #[test]
+    fn link_states() {
+        assert_eq!(link_state(None, None), LinkState::Fine);
+        assert_eq!(link_state(Some(0.010), Some(0.0)), LinkState::Fine);
+        assert_eq!(link_state(Some(0.045), Some(0.0)), LinkState::Jitter);
+        assert_eq!(link_state(Some(0.045), Some(0.05)), LinkState::Loss, "потери важнее джиттера");
+    }
+
+    #[test]
+    fn compact_rects_rows_bottom_aligned() {
+        let r = Rect::from_min_size(pos2(0.0, 0.0), vec2(650.0, 500.0));
+        let rects = compact_rects(r, 4, 12.0);
+        // 3 в ряд (3*200 + 2*12 = 624 ≤ 650), второй ряд — одна плитка по центру
+        assert_eq!(rects.len(), 4);
+        assert_eq!(rects[3].bottom(), 500.0);
+        assert!((rects[3].center().x - 325.0).abs() < 0.01);
+        assert_eq!(rects[0].top(), 500.0 - 68.0 * 2.0 - 12.0);
+    }
 
     #[test]
     fn ping_levels() {

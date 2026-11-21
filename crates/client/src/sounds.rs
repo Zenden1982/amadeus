@@ -1,7 +1,15 @@
 //! Короткие звуки: вход/выход из голоса, начало/конец трансляции, зрители своей трансляции. Синтезируются при старте (WAV в памяти) и играются через
 //! PlaySound на системном устройстве вывода по умолчанию.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Громкость звуков интерфейса, 0–100 (настройка «Звуки интерфейса»).
+static VOLUME: AtomicU8 = AtomicU8::new(60);
+
+pub fn set_volume(v: u8) {
+    VOLUME.store(v.min(100), Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Sound {
@@ -76,23 +84,36 @@ struct Bank {
     viewer_leave: Vec<u8>,
 }
 
+/// Банк звуков для громкости `step` (шаг 5 %; 60 % = прежняя громкость). PlaySound с SND_ASYNC читает WAV, пока играет,
+/// поэтому банки не освобождаются: не больше 21 штуки по ~0.2 МБ.
 fn bank() -> &'static Bank {
-    static BANK: OnceLock<Bank> = OnceLock::new();
-    BANK.get_or_init(|| Bank {
-        join_self: build(&[(523.25, 90), (783.99, 140)], 0.22),
-        leave_self: build(&[(783.99, 90), (523.25, 140)], 0.22),
-        join_other: build(&[(659.25, 70), (880.0, 110)], 0.16),
-        leave_other: build(&[(880.0, 70), (659.25, 110)], 0.16),
+    static BANKS: Mutex<Vec<(u8, &'static Bank)>> = Mutex::new(Vec::new());
+    let step = (VOLUME.load(Ordering::Relaxed).min(100) + 2) / 5 * 5;
+    let mut banks = BANKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, b)) = banks.iter().find(|(s, _)| *s == step) {
+        return b;
+    }
+    let k = step as f32 / 60.0;
+    let b: &'static Bank = Box::leak(Box::new(Bank {
+        join_self: build(&[(523.25, 90), (783.99, 140)], 0.22 * k),
+        leave_self: build(&[(783.99, 90), (523.25, 140)], 0.22 * k),
+        join_other: build(&[(659.25, 70), (880.0, 110)], 0.16 * k),
+        leave_other: build(&[(880.0, 70), (659.25, 110)], 0.16 * k),
         // трансляция — три ноты (ре–соль–до), выше и «ярче» голосовых
-        stream_start: build(&[(587.33, 60), (783.99, 60), (1046.5, 150)], 0.18),
-        stream_stop: build(&[(1046.5, 60), (783.99, 60), (587.33, 150)], 0.18),
+        stream_start: build(&[(587.33, 60), (783.99, 60), (1046.5, 150)], 0.18 * k),
+        stream_stop: build(&[(1046.5, 60), (783.99, 60), (587.33, 150)], 0.18 * k),
         // зритель — короткий тихий «блик»
-        viewer_join: build(&[(1174.66, 50), (1567.98, 90)], 0.11),
-        viewer_leave: build(&[(1567.98, 50), (1174.66, 90)], 0.11),
-    })
+        viewer_join: build(&[(1174.66, 50), (1567.98, 90)], 0.11 * k),
+        viewer_leave: build(&[(1567.98, 50), (1174.66, 90)], 0.11 * k),
+    }));
+    banks.push((step, b));
+    b
 }
 
 pub fn play(s: Sound) {
+    if VOLUME.load(Ordering::Relaxed) == 0 {
+        return;
+    }
     let b = bank();
     let data: &'static [u8] = match s {
         Sound::JoinSelf => &b.join_self,

@@ -69,7 +69,7 @@ pub enum IconState {
     Normal,
     /// Включено/выбрано — акцент.
     Active,
-    /// Выключено (микрофон, звук) — красная.
+    /// Выключено (микрофон, звук) — инверсия: фон цвета текста, значок цвета фона (красный — только «Отключиться»).
     Off,
 }
 
@@ -81,7 +81,7 @@ pub fn icon_button(ui: &mut Ui, icon: &str, state: IconState, tip: &str) -> Resp
     let (bg, fg) = match state {
         IconState::Normal => (Color32::TRANSPARENT.lerp_to_gamma(p.row_hover, hover), p.text_muted.lerp_to_gamma(p.text, hover)),
         IconState::Active => (p.accent_soft, p.accent),
-        IconState::Off => (p.danger_soft, p.danger),
+        IconState::Off => (p.text.lerp_to_gamma(p.text_muted, hover), p.bg),
     };
     let painter = ui.painter();
     painter.circle_filled(rect.center(), 18.0, bg);
@@ -101,6 +101,24 @@ pub enum DockStyle {
     Leave,
 }
 
+/// Круглая кнопка капсулы управления 46×46: только значок и подсказка.
+pub fn dock_icon(ui: &mut Ui, icon: &str, style: DockStyle, tip: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), HOVER_S);
+    let p = t::p();
+    let (fill, fg) = match style {
+        DockStyle::Normal => (p.surface_3.lerp_to_gamma(p.row_active, hover), p.text),
+        DockStyle::Live => (p.accent_soft.lerp_to_gamma(p.accent.gamma_multiply(0.3), hover), p.accent),
+        DockStyle::Off => (p.text.lerp_to_gamma(p.text_muted, hover), p.bg),
+        DockStyle::Leave => (p.danger.lerp_to_gamma(p.danger_hover, hover), Color32::WHITE),
+    };
+    let painter = ui.painter();
+    painter.circle_filled(rect.center(), 23.0, fill);
+    let font = if style == DockStyle::Normal { t::font(21.0) } else { t::icon_fill(21.0) };
+    painter.text(rect.center(), Align2::CENTER_CENTER, icon, font, fg);
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Кнопка дока: иконка + подпись, «таблетка» высотой 46.
 pub fn dock_button(ui: &mut Ui, icon: &str, label: &str, style: DockStyle) -> Response {
     let galley = ui.painter().layout_no_wrap(label.to_string(), t::bold(14.0), Color32::PLACEHOLDER);
@@ -111,7 +129,7 @@ pub fn dock_button(ui: &mut Ui, icon: &str, label: &str, style: DockStyle) -> Re
     let (fill, icon_c, text_c, stroke) = match style {
         DockStyle::Normal => (p.surface_3.lerp_to_gamma(p.row_active, hover), p.text, p.text, Color32::TRANSPARENT),
         DockStyle::Live => (p.accent_soft, p.accent, p.text, p.accent.gamma_multiply(0.45)),
-        DockStyle::Off => (p.danger_soft, p.danger, p.text, p.danger.gamma_multiply(0.4)),
+        DockStyle::Off => (p.text.lerp_to_gamma(p.text_muted, hover), p.bg, p.bg, Color32::TRANSPARENT),
         DockStyle::Leave => (p.danger.lerp_to_gamma(p.danger_hover, hover), Color32::WHITE, Color32::WHITE, Color32::TRANSPARENT),
     };
     let painter = ui.painter();

@@ -25,11 +25,45 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     let k = ui.ctx().animate_bool_with_time(resp.id, *on, HOVER_S);
     let p = t::p();
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(12), p.border_strong.lerp_to_gamma(p.accent, k));
+    painter.rect_filled(rect, CornerRadius::same(12), p.border_strong.lerp_to_gamma(p.accent_strong, k));
     let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, k);
     painter.circle_filled(pos2(x, rect.center().y + 0.5), 9.5, Color32::from_black_alpha(30));
     painter.circle_filled(pos2(x, rect.center().y), 9.0, Color32::WHITE);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Сегментированный переключатель: серая подложка, выбранный вариант — белая «таблетка» с тенью.
+/// Возвращает true, если выбор изменился.
+pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, selected: &mut T, items: &[(T, &str)]) -> bool {
+    let p = t::p();
+    let font = t::semibold(13.0);
+    let galleys: Vec<_> = items.iter().map(|(_, s)| ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::PLACEHOLDER)).collect();
+    let seg_w: Vec<f32> = galleys.iter().map(|g| g.size().x + 24.0).collect();
+    let (rect, base) = ui.allocate_exact_size(vec2(seg_w.iter().sum::<f32>() + 6.0, 34.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(255), p.row_hover);
+    let mut changed = false;
+    let mut x = rect.left() + 3.0;
+    for (i, ((value, _), galley)) in items.iter().zip(galleys).enumerate() {
+        let r = egui::Rect::from_min_size(pos2(x, rect.top() + 3.0), vec2(seg_w[i], rect.height() - 6.0));
+        x += seg_w[i];
+        let resp = ui.interact(r, base.id.with(("seg", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let on = *selected == *value;
+        if resp.clicked() && !on {
+            *selected = *value;
+            changed = true;
+        }
+        let painter = ui.painter();
+        if on {
+            painter.rect_filled(r.translate(vec2(0.0, 1.0)), CornerRadius::same(255), Color32::from_black_alpha(28));
+            let pill = if std::ptr::eq(p, &t::LIGHT) { Color32::WHITE } else { p.border_strong };
+            painter.rect_filled(r, CornerRadius::same(255), pill);
+        } else if resp.hovered() {
+            painter.rect_filled(r, CornerRadius::same(255), p.row_active);
+        }
+        let color = if on { p.text } else { p.text_muted };
+        painter.galley(r.center() - galley.size() / 2.0, galley, color);
+    }
+    changed
 }
 
 /// Доля значения в диапазоне 0..1 (пустой диапазон — 0, без деления на ноль).

@@ -39,6 +39,38 @@ impl ThemePref {
     }
 }
 
+/// Анимации интерфейса.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnimPref {
+    #[default]
+    All,
+    /// Только волна речи и анимация подключения.
+    Important,
+    /// Всё статично.
+    Off,
+}
+
+/// Как показывать, что человек говорит.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeechIndicator {
+    #[default]
+    Wave,
+    /// Обводка вокруг аватара, без волны.
+    Ring,
+}
+
+/// Пинг в заголовке канала.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PingDisplay {
+    #[default]
+    WaveAndMs,
+    MsOnly,
+    Hidden,
+}
+
 /// Шумоподавление микрофона.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +117,8 @@ pub struct Settings {
     pub noise: NoiseMode,
     pub auto_gain: bool,
     pub sounds: bool,
+    /// Громкость звуков интерфейса, 0–100.
+    pub sounds_volume: u8,
     /// Громкость участников по id пользователя (identity), 1.0 = 100%.
     pub user_volume: HashMap<String, f32>,
     /// Заглушённые для себя участники.
@@ -101,6 +135,16 @@ pub struct Settings {
     pub autostart: bool,
     /// Тема оформления.
     pub theme: ThemePref,
+    /// Анимации: None — по системной настройке Windows («Показывать анимацию» выкл. → «Выкл.», иначе «Все»).
+    pub animations: Option<AnimPref>,
+    /// Останавливать анимации, когда окно свёрнуто или не в фокусе.
+    pub pause_anim_in_background: bool,
+    pub speech_indicator: SpeechIndicator,
+    pub ping_display: PingDisplay,
+    /// Компактные плитки участников (≈200×68).
+    pub compact_tiles: bool,
+    /// Живой кот в заголовке окна (моргает, шевелит ушами).
+    pub live_cat: bool,
     /// Последний открытый сервер.
     pub last_server: Option<i64>,
     /// Свёрнутые категории каналов (id).
@@ -121,6 +165,7 @@ impl Default for Settings {
             noise: NoiseMode::default(),
             auto_gain: true,
             sounds: true,
+            sounds_volume: 60,
             user_volume: HashMap::new(),
             user_muted: HashMap::new(),
             stream_preset: Preset::default(),
@@ -129,6 +174,12 @@ impl Default for Settings {
             close_to_tray: true,
             autostart: true,
             theme: ThemePref::default(),
+            animations: None,
+            pause_anim_in_background: true,
+            speech_indicator: SpeechIndicator::default(),
+            ping_display: PingDisplay::default(),
+            compact_tiles: false,
+            live_cat: true,
             last_server: None,
             collapsed_categories: Vec::new(),
         }
@@ -176,6 +227,11 @@ impl Settings {
         }
     }
 
+    /// Анимации с учётом системной настройки Windows (если пользователь не выбирал сам).
+    pub fn animations_effective(&self) -> AnimPref {
+        self.animations.unwrap_or_else(|| if crate::anim::system_animations_enabled() { AnimPref::All } else { AnimPref::Off })
+    }
+
     pub fn volume_of(&self, identity: &str) -> f32 {
         self.user_volume.get(identity).copied().unwrap_or(1.0)
     }
@@ -202,5 +258,13 @@ mod tests {
     fn old_settings_default_theme() {
         let s: Settings = serde_json::from_str(r#"{"noise_suppression":true}"#).unwrap();
         assert_eq!(s.theme, ThemePref::System);
+    }
+
+    #[test]
+    fn old_settings_default_appearance() {
+        let s: Settings = serde_json::from_str(r#"{"sounds":true}"#).unwrap();
+        assert_eq!(s.animations, None);
+        assert!(s.pause_anim_in_background && s.live_cat && !s.compact_tiles);
+        assert_eq!((s.speech_indicator, s.ping_display, s.sounds_volume), (SpeechIndicator::Wave, PingDisplay::WaveAndMs, 60));
     }
 }

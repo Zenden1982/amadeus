@@ -28,13 +28,16 @@ pub struct Loaded {
     pub voice: Vec<VoiceRoster>,
 }
 
+/// Проверка кода приглашения. Ошибка: (код не найден/недействителен — не сетевая ошибка, текст).
+type PreviewRes = Result<InvitePreview, (bool, String)>;
+
 enum Ev {
     /// `since` — `Model::seq` в момент запроса.
     All { since: u64, res: ApiResult<Vec<Loaded>> },
     One(ApiResult<Loaded>),
     Created(Result<Server, String>),
     Joined(Result<Server, String>),
-    Preview { code: String, res: Result<InvitePreview, String> },
+    Preview { code: String, res: PreviewRes },
     Invite(Result<Invite, String>),
     Left { server: i64, res: Result<(), String> },
     Icon(Result<Option<image::DynamicImage>, String>),
@@ -67,7 +70,7 @@ struct AddDialog {
     icon: Option<Vec<u8>>,
     icon_tex: Option<TextureHandle>,
     code: String,
-    preview: Option<(String, Result<InvitePreview, String>)>,
+    preview: Option<(String, PreviewRes)>,
     busy: bool,
     error: Option<String>,
 }
@@ -75,6 +78,8 @@ struct AddDialog {
 struct InviteDialog {
     server: i64,
     res: Option<Result<Invite, String>>,
+    /// Сервер только что создан — сверху кот «Сервер готов!».
+    created: bool,
 }
 
 struct LeaveDialog {
@@ -208,15 +213,23 @@ impl ServersUi {
                         put(model, people, l);
                     }
                 }
-                Ev::Created(res) | Ev::Joined(res) => {
+                Ev::Created(ref res) | Ev::Joined(ref res) => {
+                    let created = matches!(ev, Ev::Created(_));
                     if let Some(d) = self.add.as_mut() {
                         d.busy = false;
                     }
-                    match res {
+                    match res.clone() {
                         Ok(server) => {
                             self.add = None;
                             out.select = Some(server.id);
                             model.apply(&proto::ServerEvent::ServerUpserted { server: server.clone() });
+                            // свой новый сервер — сразу окно приглашения с котом «Сервер готов!»
+                            if created {
+                                self.open_invite(server.id);
+                                if let Some(d) = self.invite.as_mut() {
+                                    d.created = true;
+                                }
+                            }
                             self.reload_one(server);
                         }
                         Err(e) => {
@@ -300,7 +313,7 @@ impl ServersUi {
     }
 
     pub fn open_invite(&mut self, server: i64) {
-        self.invite = Some(InviteDialog { server, res: None });
+        self.invite = Some(InviteDialog { server, res: None, created: false });
         let api = self.api.clone();
         self.spawn(async move {
             Ev::Invite(api.create_server_invite(server, INVITE_USES, INVITE_HOURS).await.map_err(|e| e.message))
@@ -439,10 +452,10 @@ impl ServersUi {
                     submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let code = api::normalize_invite(&d.code);
                     if code.len() == 12 && d.preview.as_ref().is_none_or(|(c, _)| *c != code) {
-                        d.preview = Some((code.clone(), Err("Проверяю код…".into())));
+                        d.preview = Some((code.clone(), Err((false, "Проверяю код…".into()))));
                         let (api, code) = (self.api.clone(), code.clone());
                         self.spawn(async move {
-                            let res = api.invite_preview(&code).await.map_err(|e| e.message);
+                            let res = api.invite_preview(&code).await.map_err(|e| (e.code != "network", e.message));
                             Ev::Preview { code, res }
                         });
                     }
@@ -451,7 +464,11 @@ impl ServersUi {
                         Some((c, Ok(p))) if *c == code => {
                             ui.label(RichText::new(format!("Вас пригласили на «{}»", p.server_name)).font(t::semibold(14.0)).color(t::p().text));
                         }
-                        Some((c, Err(e))) if *c == code => {
+                        Some((c, Err((true, _)))) if *c == code => {
+                            ui.add_space(8.0);
+                            kit::cat_state(ui, kit::Cat::NotFound, "Приглашение не найдено", "Ссылка устарела или в ней опечатка", None);
+                        }
+                        Some((c, Err((false, e)))) if *c == code => {
                             ui.label(RichText::new(e).size(13.0).color(t::p().text_muted));
                         }
                         _ => {
@@ -519,7 +536,12 @@ impl ServersUi {
 
     fn ui_invite(&mut self, ctx: &egui::Context) {
         let Some(d) = &self.invite else { return };
-        let res = kit::modal(ctx, "server-invite", "Пригласить друзей", 400.0, |ui| match &d.res {
+        let res = kit::modal(ctx, "server-invite", "Пригласить друзей", 400.0, |ui| {
+            if d.created {
+                kit::cat_state(ui, kit::Cat::Success, "Сервер готов!", "Скопируй код и позови друзей", None);
+                ui.add_space(14.0);
+            }
+            match &d.res {
             None => {
                 ui.horizontal(|ui| {
                     kit::spinner(ui, 18.0);
@@ -543,6 +565,7 @@ impl ServersUi {
                 });
                 ui.add_space(6.0);
                 ui.label(RichText::new(format!("{INVITE_USES} входов · действует 7 дней")).size(12.5).color(t::p().text_muted));
+            }
             }
         });
         let _ = d.server;

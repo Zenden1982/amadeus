@@ -734,7 +734,7 @@ impl Chat {
                 if reached_start && msgs.is_empty() && outbox.is_empty() {
                     // Пустой канал — кот и приглашение написать первым.
                     ui.add_space((ui.available_height() * 0.25).max(20.0));
-                    kit::empty_state(ui, kit::MascotPose::Sitting, "Пока пусто", &format!("Напиши первым в #{}", ch.name), None);
+                    kit::cat_state(ui, kit::Cat::Peek, "Сообщений пока нет", &format!("Напиши первым в #{}", ch.name), None);
                 } else if reached_start {
                     channel_intro(ui, &ch.name);
                 } else {

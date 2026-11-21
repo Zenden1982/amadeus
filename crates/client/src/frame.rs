@@ -248,7 +248,7 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
             p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t::p().border));
             // лого бренда (знак + «murmur»); окно без фокуса — приглушённо
             const LOGO_H: f32 = 20.0;
-            t::paint_lockup(p, pos2(r.left() + 14.0, r.center().y - LOGO_H / 2.0), LOGO_H, focused);
+            t::paint_lockup_pose(p, pos2(r.left() + 14.0, r.center().y - LOGO_H / 2.0), LOGO_H, focused, cat_pose(&ctx));
 
             let forced = forced_hover();
             for (rect, kind) in [(minb, Btn::Min), (maxb, Btn::Max), (close, Btn::Close)] {
@@ -277,6 +277,52 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
             }
         });
     badge_clicked
+}
+
+/// Когда кто-то зашёл в канал — уши кота в заголовке приподнимаются (~300 мс).
+static EARS_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+pub fn perk_ears() {
+    *EARS_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+}
+
+/// Моргание раз в 4–8 с (~150 мс) и уши. Между событиями — одна отложенная перерисовка к следующему моргания;
+/// во время движения — до 30 к/с. «Живой кот» выключен, анимации не «Все» или окно не на виду — статичный знак, без перерисовок.
+fn cat_pose(ctx: &egui::Context) -> t::MarkPose {
+    use std::time::Duration;
+    const BLINK: f64 = 0.15;
+    if !crate::anim::live_cat(ctx) {
+        return t::MarkPose::default();
+    }
+    let now = ctx.input(|i| i.time);
+    let id = Id::new("title-cat-next-blink");
+    let mut next = ctx.data(|d| d.get_temp::<f64>(id)).unwrap_or(now + 4.0);
+    let mut pose = t::MarkPose::default();
+    let mut wake = next - now;
+    if now >= next {
+        let k = (now - next) / BLINK;
+        if k >= 1.0 {
+            // следующее моргание через 4–8 с (псевдослучайно от времени)
+            let rnd = ((now * 1000.0) as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 40;
+            next = now + 4.0 + 4.0 * (rnd % 1000) as f64 / 1000.0;
+            ctx.data_mut(|d| d.insert_temp(id, next));
+            wake = next - now;
+        } else {
+            pose.blink = (k * std::f64::consts::PI).sin() as f32;
+            wake = 0.033;
+        }
+    } else {
+        ctx.data_mut(|d| d.insert_temp(id, next));
+    }
+    if let Some(at) = *EARS_AT.lock().unwrap_or_else(|e| e.into_inner()) {
+        let el = at.elapsed().as_secs_f64();
+        if el < 0.3 {
+            pose.ears = 2.0 * (el / 0.3 * std::f64::consts::PI).sin() as f32;
+            wake = wake.min(0.033);
+        }
+    }
+    ctx.request_repaint_after(Duration::from_secs_f64(wake.max(0.016)));
+    pose
 }
 
 /// Отладка вёрстки (только debug): AMADEUS_FRAME_HOVER=min|max|close — кнопка как при наведении.
