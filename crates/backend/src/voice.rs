@@ -59,6 +59,11 @@ pub fn parse_room(name: &str) -> Option<(i64, i64)> {
     Some((s.parse().ok()?, c.parse().ok()?))
 }
 
+/// Наша комната: голосовой канал сервера или звонок в ЛС.
+pub fn is_ours(name: &str) -> bool {
+    parse_room(name).is_some() || crate::dm::parse_dm_room(name).is_some()
+}
+
 /// Присутствие: комната → (user id → sid участника LiveKit; "" — неизвестен, после сверки).
 #[derive(Default)]
 pub struct Presence {
@@ -110,6 +115,10 @@ impl Presence {
 }
 
 fn broadcast_roster(state: &AppState, room: &str) {
+    if let Some(dm) = crate::dm::parse_dm_room(room) {
+        crate::dm::room_changed(state, dm);
+        return;
+    }
     if let Some((server_id, channel_id)) = parse_room(room) {
         let user_ids = state.inner.presence.roster(room);
         publish(state, Audience::Server(server_id), ServerEvent::Voice { server_id, roster: VoiceRoster { channel_id, user_ids } });
@@ -154,7 +163,7 @@ pub async fn reconcile(state: &AppState) -> anyhow::Result<()> {
         let mut rooms = state.inner.presence.rooms.lock().unwrap();
         let mut fresh: HashMap<String, BTreeMap<i64, String>> = HashMap::new();
         for (room, ids) in listing {
-            if parse_room(&room).is_none() {
+            if !is_ours(&room) {
                 continue;
             }
             let old = rooms.get(&room);
@@ -218,7 +227,7 @@ pub async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: St
         AppError::Unauthorized
     })?;
     let room = ev.room.as_ref().map(|r| r.name.as_str()).unwrap_or("");
-    if parse_room(room).is_none() {
+    if !is_ours(room) {
         return Ok(StatusCode::OK);
     }
     let participant = ev.participant.as_ref();
@@ -262,7 +271,7 @@ impl Rooms for LiveKitRooms {
         Box::pin(async move {
             let mut out = Vec::new();
             for room in self.client.list_rooms(Vec::new()).await? {
-                if parse_room(&room.name).is_none() {
+                if !is_ours(&room.name) {
                     continue;
                 }
                 let ps = self.client.list_participants(&room.name).await?;

@@ -89,6 +89,8 @@ pub struct ListCtx<'a> {
     /// Канал, в котором я сейчас (голос), и живые участники (с индикатором речи).
     pub my_voice: Option<(i64, &'a [Peer])>,
     pub open_text: Option<i64>,
+    /// Непрочитанные сообщения.
+    pub unread: &'a crate::unread::Unread,
     /// Свёрнутые категории (настройки).
     pub collapsed: &'a mut Vec<i64>,
 }
@@ -335,7 +337,8 @@ impl ChannelsUi {
             _ => None,
         };
         let (icon, active) = if voice { (ph::SPEAKER_HIGH, here) } else { (ph::HASH, cx.open_text == Some(ch.id)) };
-        let mut resp = kit::row(ui, icon, &ch.name, active, trailing.as_deref(), !full);
+        let unread = if voice { 0 } else { cx.unread.count(ch.id) };
+        let mut resp = kit::row_ex(ui, icon, &ch.name, active, trailing.as_deref(), !full, unread);
         if full {
             resp = resp.on_hover_text("Канал заполнен");
         }

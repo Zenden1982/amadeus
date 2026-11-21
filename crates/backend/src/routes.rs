@@ -10,7 +10,7 @@ use proto::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, SESSION_TTL, channels, chat, events, friends, images, invites, profile, releases, servers, voice,
+    AppState, SESSION_TTL, channels, chat, dm, events, friends, images, invites, profile, releases, servers, voice,
     db::{self},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
@@ -59,6 +59,10 @@ pub fn router(state: AppState) -> Router {
         .route("/friends/requests", post(friends::request))
         .route("/friends/{id}/accept", post(friends::accept))
         .route("/friends/{id}", delete(friends::remove))
+        .route("/dms", get(dm::list).post(dm::open))
+        .route("/dms/{id}/call", post(dm::call).delete(dm::hang_up))
+        .route("/unread", get(dm::unread))
+        .route("/channels/{id}/read", post(dm::read))
         .route("/servers", get(servers::list).post(servers::create))
         .route("/servers/{id}", axum::routing::patch(servers::update).delete(servers::delete))
         .route(

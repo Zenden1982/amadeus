@@ -42,6 +42,8 @@ pub struct Friends {
     busy: bool,
     /// Кого спросили «удалить из друзей?».
     confirm_remove: Option<i64>,
+    /// Нажали «Написать» — открыть ЛС с этим человеком (забирает приложение).
+    message_to: Option<i64>,
 }
 
 impl Friends {
@@ -62,6 +64,7 @@ impl Friends {
             status: None,
             busy: false,
             confirm_remove: None,
+            message_to: None,
         }
     }
 
@@ -166,6 +169,22 @@ impl Friends {
     /// Входящих заявок (бейдж на кнопке).
     pub fn incoming(&self) -> usize {
         self.list.incoming.len()
+    }
+
+    /// Нажали «Написать» у друга: его id (один раз).
+    pub fn take_message(&mut self) -> Option<i64> {
+        self.message_to.take()
+    }
+
+    /// Показать ошибку в окне друзей (например, не удалось открыть ЛС).
+    pub fn show_error(&mut self, e: String) {
+        self.status = Some(Err(e));
+        self.open = true;
+    }
+
+    /// В сети ли друг; None — не друг.
+    pub fn online(&self, id: i64) -> Option<bool> {
+        self.list.friends.iter().find(|f| f.user.id == id).map(|f| f.online)
     }
 
     /// Друзья есть, и никого нет в сети — кот в заголовке спит.
@@ -361,8 +380,14 @@ impl Friends {
                         self.confirm_remove = None;
                         self.act(false, u.id);
                     }
-                } else if kit::icon_button(ui, egui_phosphor::regular::USER_MINUS, kit::IconState::Normal, "Удалить из друзей").clicked() {
-                    self.confirm_remove = Some(u.id);
+                } else {
+                    if kit::icon_button(ui, egui_phosphor::regular::USER_MINUS, kit::IconState::Normal, "Удалить из друзей").clicked() {
+                        self.confirm_remove = Some(u.id);
+                    }
+                    if kit::icon_button(ui, egui_phosphor::regular::CHAT_CIRCLE, kit::IconState::Normal, "Написать").clicked() {
+                        self.message_to = Some(u.id);
+                        self.open = false;
+                    }
                 }
             });
         });
@@ -402,10 +427,7 @@ pub fn rail_button(ui: &mut Ui, incoming: usize, open: bool) -> bool {
     let resp = resp.on_hover_text("Друзья").on_hover_cursor(egui::CursorIcon::PointingHand);
     if incoming > 0 {
         let c = pos2(resp.rect.right() - 4.0, resp.rect.top() + 4.0);
-        let text = if incoming > 9 { "9+".to_string() } else { incoming.to_string() };
-        ui.painter().circle_filled(c, 9.5, p.rail);
-        ui.painter().circle_filled(c, 8.0, p.accent_strong);
-        ui.painter().text(c, Align2::CENTER_CENTER, text, t::xbold(10.5), p.on_accent);
+        kit::count_badge(ui.painter(), c, &crate::unread::badge_text(incoming as u32), p.rail);
     }
     resp.clicked()
 }

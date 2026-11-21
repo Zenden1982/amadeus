@@ -323,22 +323,23 @@ impl ServersUi {
     // ------------------------------------------------------------ колонка
 
     /// Колонка значков. Возвращает выбранный сервер.
-    pub fn column(&mut self, ui: &mut Ui, model: &Model, people: &People) -> Option<i64> {
+    /// `dm_open` — открыт личный диалог: активный сервер не подсвечивается.
+    pub fn column(&mut self, ui: &mut Ui, model: &Model, people: &People, unread: &crate::unread::Unread, dm_open: bool) -> Option<i64> {
         let mut pick = None;
         let left = ui.max_rect().left();
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.add_space(12.0);
             for s in &model.servers {
-                let active = model.active == Some(s.id);
+                let active = model.active == Some(s.id) && !dm_open;
                 let mark = match s.icon.as_deref().and_then(|k| people.texture(k)) {
                     Some(tex) => kit::ServerMark::Image(tex.id()),
                     None => kit::ServerMark::Letter(initials(&s.name)),
                 };
                 let resp = kit::server_icon(ui, &mark, active, &s.name);
-                if active || resp.hovered() {
-                    // полоска слева: у активного — высокая, при наведении — короткая
-                    let h = if active { 36.0 } else { 18.0 };
+                if active || resp.hovered() || unread.server_has(s.id) {
+                    // полоска слева: у активного — высокая, при наведении — короткая, непрочитанное — точка
+                    let h = if active { 36.0 } else if resp.hovered() { 18.0 } else { 8.0 };
                     let r = Rect::from_center_size(pos2(left + 2.0, resp.rect.center().y), vec2(4.0, h));
                     ui.painter().rect_filled(r, CornerRadius::same(2), if active { t::p().accent } else { t::p().text_muted });
                 }

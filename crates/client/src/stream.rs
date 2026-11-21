@@ -53,6 +53,11 @@ impl Preset {
         CaptureConfig { max_width, max_height, fps }
     }
 
+    /// Экономный слой для зрителей со слабым каналом: только когда основной заметно больше 720p30.
+    pub fn has_low(self) -> bool {
+        !matches!(self, Preset::P720_30)
+    }
+
     /// Потолок битрейта; реальный подстраивает WebRTC (GCC) под канал.
     pub fn max_bitrate(self) -> u64 {
         match self {
@@ -64,6 +69,13 @@ impl Preset {
         }
     }
 }
+
+/// Имена треков трансляции: основной и экономный слой (свой simulcast: аппаратный энкодер выдаёт один готовый поток).
+pub const MAIN_TRACK: &str = "screen";
+pub const LOW_TRACK: &str = "screen-low";
+/// Экономный слой: 720p30, потолок 1,5 Мбит/с.
+pub const LOW_CFG: CaptureConfig = CaptureConfig { max_width: 1280, max_height: 720, fps: 30 };
+pub const LOW_BITRATE: u64 = 1_500_000;
 
 /// Событие захвата с номером поколения (события старого захвата после смены окна игнорируются).
 #[derive(Debug)]
@@ -110,7 +122,7 @@ pub fn new_source(width: u32, height: u32, preset: Preset) -> NativeVideoSource 
 }
 
 pub async fn publish(room: &Room, source: &NativeVideoSource, preset: Preset, hw: bool) -> RoomResult<LocalTrackPublication> {
-    let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
+    let track = LocalVideoTrack::create_video_track(MAIN_TRACK, RtcVideoSource::Native(source.clone()));
     let opts = TrackPublishOptions {
         source: TrackSource::Screenshare,
         video_codec: VideoCodec::H264,
@@ -123,6 +135,26 @@ pub async fn publish(room: &Room, source: &NativeVideoSource, preset: Preset, hw
     room.local_participant().publish_track(LocalTrack::Video(track), opts).await
 }
 
+/// Экономный слой (только аппаратный путь, уже закодирован).
+pub async fn publish_low(room: &Room, source: &NativeVideoSource) -> RoomResult<LocalTrackPublication> {
+    let track = LocalVideoTrack::create_video_track(LOW_TRACK, RtcVideoSource::Native(source.clone()));
+    let opts = TrackPublishOptions {
+        source: TrackSource::Screenshare,
+        video_codec: VideoCodec::H264,
+        simulcast: false,
+        video_encoder: VideoEncoderBackend::PreEncoded,
+        video_encoding: Some(VideoEncoding { max_bitrate: LOW_BITRATE, max_framerate: LOW_CFG.fps as f64 }),
+        ..Default::default()
+    };
+    room.local_participant().publish_track(LocalTrack::Video(track), opts).await
+}
+
+/// Источник экономного слоя под размер окна.
+pub fn new_low_source(width: u32, height: u32) -> NativeVideoSource {
+    let (w, h) = capture_win::capture::target_size(width.max(2), height.max(2), &LOW_CFG);
+    NativeVideoSource::new_encoded(VideoResolution { width: w, height: h })
+}
+
 pub fn sink(source: &NativeVideoSource, generation: u64, events: &mpsc::UnboundedSender<CaptureEvent>) -> Arc<dyn Sink> {
     Arc::new(LkSink { source: source.clone(), generation, events: events.clone() })
 }
@@ -132,6 +164,37 @@ pub struct LkEncodedSink {
     pub source: NativeVideoSource,
     pub generation: u64,
     pub events: mpsc::UnboundedSender<CaptureEvent>,
+}
+
+/// Приёмник экономного слоя: события захвата шлёт основной слой — здесь только ошибки в лог.
+struct LowSink(NativeVideoSource);
+
+impl EncodedSink for LowSink {
+    fn encoded(&self, data: &[u8], keyframe: bool, timestamp_us: i64, width: u32, height: u32) {
+        let f = EncodedVideoFrame {
+            codec: EncodedVideoCodec::H264,
+            payload: data,
+            timestamp_us,
+            frame_type: if keyframe { EncodedFrameType::Key } else { EncodedFrameType::Delta },
+            resolution: VideoResolution { width, height },
+            frame_metadata: None,
+        };
+        self.0.capture_encoded_frame(&f);
+    }
+
+    fn take_keyframe_request(&self) -> bool {
+        self.0.take_keyframe_request()
+    }
+
+    fn take_bitrate_request(&self) -> Option<u32> {
+        self.0.take_rate_control_request().map(|r| r.target_bitrate_bps.min(u32::MAX as u64) as u32)
+    }
+
+    fn event(&self, event: Event) {
+        if let Event::Error(e) = event {
+            log::warn!("экономный слой: {e}");
+        }
+    }
 }
 
 impl EncodedSink for LkEncodedSink {
@@ -178,6 +241,8 @@ impl AnyCapture {
 pub struct Started {
     pub capture: AnyCapture,
     pub video: NativeVideoSource,
+    /// Экономный слой (аппаратный путь, пресет выше 720p30).
+    pub low: Option<NativeVideoSource>,
     pub hw: bool,
     /// Для интерфейса: «NVIDIA H.264 Encoder MFT (видеокарта)» / «OpenH264 (процессор)».
     pub encoder: String,
@@ -201,28 +266,36 @@ pub fn start(
         let cfg = preset.config();
         let (w, h) = capture_win::capture::target_size(width.max(2), height.max(2), &cfg);
         let video = NativeVideoSource::new_encoded(VideoResolution { width: w, height: h });
-        match start_hw(id, preset, &video, generation, events) {
+        let low = (preset.has_low() && low_allowed()).then(|| new_low_source(width, height));
+        match start_hw(id, preset, &video, low.as_ref(), generation, events) {
             Ok(c) => {
                 let encoder = format!("{} (видеокарта)", c.encoder_name);
-                return Ok(Started { capture: AnyCapture::Hw(c), video, hw: true, encoder });
+                return Ok(Started { capture: AnyCapture::Hw(c), video, low, hw: true, encoder });
             }
             Err(e) => log::warn!("аппаратное кодирование недоступно: {e} — кодирует процессор"),
         }
     }
     let video = new_source(width, height, preset);
     let c = Capture::start(id, preset.config(), sink(&video, generation, events))?;
-    Ok(Started { capture: AnyCapture::Cpu(c), video, hw: false, encoder: "OpenH264 (процессор)".into() })
+    Ok(Started { capture: AnyCapture::Cpu(c), video, low: None, hw: false, encoder: "OpenH264 (процессор)".into() })
+}
+
+/// Экономный слой публикуется по умолчанию (зритель выбирает слой сам); `AMADEUS_NO_LOW=1` — выключить.
+pub fn low_allowed() -> bool {
+    !std::env::var("AMADEUS_NO_LOW").is_ok_and(|v| v == "1")
 }
 
 fn start_hw(
     id: SourceId,
     preset: Preset,
     video: &NativeVideoSource,
+    low: Option<&NativeVideoSource>,
     generation: u64,
     events: &mpsc::UnboundedSender<CaptureEvent>,
 ) -> Result<HwCapture, String> {
     let sink = Arc::new(LkEncodedSink { source: video.clone(), generation, events: events.clone() });
-    HwCapture::start(id, preset.config(), preset.max_bitrate() as u32, sink)
+    let low = low.map(|l| capture_win::hw::LowLayer { sink: Arc::new(LowSink(l.clone())), cfg: LOW_CFG, bitrate: LOW_BITRATE as u32 });
+    HwCapture::start_with_low(id, preset.config(), preset.max_bitrate() as u32, sink, low)
 }
 
 /// Смена источника в уже опубликованный трек (тот же вид кодирования).
@@ -230,12 +303,13 @@ pub fn restart(
     id: SourceId,
     preset: Preset,
     video: &NativeVideoSource,
+    low: Option<&NativeVideoSource>,
     hw: bool,
     generation: u64,
     events: &mpsc::UnboundedSender<CaptureEvent>,
 ) -> Result<AnyCapture, String> {
     if hw {
-        start_hw(id, preset, video, generation, events).map(AnyCapture::Hw)
+        start_hw(id, preset, video, low, generation, events).map(AnyCapture::Hw)
     } else {
         Capture::start(id, preset.config(), sink(video, generation, events)).map(AnyCapture::Cpu)
     }

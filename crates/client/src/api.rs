@@ -227,8 +227,44 @@ impl Api {
 
     /// Отображаемое имя (пустая строка — сбросить на логин).
     pub async fn update_me(&self, display_name: &str) -> ApiResult<User> {
-        let body = proto::UpdateMeRequest { display_name: Some(display_name.to_string()) };
+        let body = proto::UpdateMeRequest { display_name: Some(display_name.to_string()), dm_from_servers: None };
         self.call(Method::PATCH, "/me", Some(&body)).await
+    }
+
+    /// Кто может писать мне в ЛС: true — и люди с общих серверов.
+    pub async fn set_dm_from_servers(&self, open: bool) -> ApiResult<User> {
+        let body = proto::UpdateMeRequest { display_name: None, dm_from_servers: Some(open) };
+        self.call(Method::PATCH, "/me", Some(&body)).await
+    }
+
+    /// Мои диалоги (ЛС), свежие сверху.
+    pub async fn dms(&self) -> ApiResult<Vec<proto::DmChannel>> {
+        self.call::<(), _>(Method::GET, "/dms", None).await
+    }
+
+    /// Открыть диалог с человеком (или найти существующий).
+    pub async fn open_dm(&self, user_id: i64) -> ApiResult<proto::DmChannel> {
+        self.call(Method::POST, "/dms", Some(&proto::OpenDmRequest { user_id })).await
+    }
+
+    /// Позвонить в ЛС или ответить на звонок — токен комнаты звонка.
+    pub async fn dm_call(&self, channel_id: i64) -> ApiResult<JoinResponse> {
+        self.call::<(), _>(Method::POST, &format!("/dms/{channel_id}/call"), None).await
+    }
+
+    /// Положить трубку: отменить, отклонить или выйти из звонка.
+    pub async fn dm_hang_up(&self, channel_id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/dms/{channel_id}/call"), None).await
+    }
+
+    /// Каналы с непрочитанными сообщениями.
+    pub async fn unread(&self) -> ApiResult<Vec<proto::UnreadChannel>> {
+        self.call::<(), _>(Method::GET, "/unread", None).await
+    }
+
+    /// Канал прочитан до сообщения включительно.
+    pub async fn mark_read(&self, channel_id: i64, message_id: i64) -> ApiResult<()> {
+        self.call(Method::POST, &format!("/channels/{channel_id}/read"), Some(&proto::ReadRequest { message_id })).await
     }
 
     pub async fn put_avatar(&self, bytes: Vec<u8>) -> ApiResult<User> {

@@ -87,6 +87,10 @@ impl Model {
 
     /// Мой голосовой канал пропал: сервер ушёл или канал удалён (раскладка известна).
     pub fn voice_channel_gone(&self, ch: &Channel) -> bool {
+        // звонок в ЛС к серверам не относится
+        if crate::dms::is_dm(ch) {
+            return false;
+        }
         if !self.has_server(ch.server_id) {
             return true;
         }
@@ -187,7 +191,9 @@ impl Model {
             | ServerEvent::Hello
             | ServerEvent::Resync
             | ServerEvent::FriendsChanged
-            | ServerEvent::Presence { .. } => {}
+            | ServerEvent::Presence { .. }
+            | ServerEvent::ReadState { .. }
+            | ServerEvent::Call { .. } => {}
         }
     }
 

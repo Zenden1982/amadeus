@@ -12,13 +12,14 @@ use livekit::options::{AudioEncoding, TrackPublishOptions};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::prelude::*;
-use livekit::webrtc::stats::RtcStats;
+use livekit::webrtc::stats::{OutboundRtpStats, RtcStats};
 use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
 use proto::Channel;
 use tokio::sync::mpsc;
 
 use crate::api::Api;
 use crate::config::NoiseMode;
+use crate::layers::{self, AutoLayer, Layer, Quality};
 use crate::sounds::{self, Sound};
 use crate::stream::{self, CaptureEvent, Preset};
 use crate::video::VideoHub;
@@ -27,6 +28,8 @@ use crate::video::VideoHub;
 const PTT_RELEASE_DELAY: Duration = Duration::from_millis(180);
 const TICK: Duration = Duration::from_millis(80);
 const STATS_EVERY: Duration = Duration::from_secs(2);
+/// Сколько не судить о качестве приёма после смены слоя (подписка на новый трек).
+const LAYER_SETTLE: Duration = Duration::from_secs(6);
 /// Служебное сообщение стримера зрителям: почему картинка на паузе («minimized» / «hidden» / «live»).
 const STREAM_STATE_TOPIC: &str = "murmur.stream-state";
 /// Зритель — стримеру: «1» начал смотреть, «0» перестал (для звука и счётчика зрителей).
@@ -72,6 +75,8 @@ pub enum Cmd {
     SetProcessing { aec: bool, noise: NoiseMode, agc: bool },
     SetSounds(bool),
     RefreshDevices,
+    /// Качество трансляции участника: Авто / Исходное / Экономное (слой у стримера).
+    SetStreamQuality { identity: String, quality: Quality },
     /// Новый API-клиент (после входа/смены сервера).
     SetApi(Api),
     /// Начать трансляцию или сменить источник на лету (тот же трек, без переподключения).
@@ -148,6 +153,18 @@ pub struct VoiceState {
     pub metrics: Option<crate::metrics::Metrics>,
     /// Стримеры, у которых картинка на паузе, и почему (identity → причина).
     pub stream_paused: HashMap<String, StreamPause>,
+    /// Слои трансляций, которые смотрим (identity → выбор, текущий слой).
+    pub stream_layers: HashMap<String, LayerInfo>,
+}
+
+/// Качество просматриваемой трансляции (для интерфейса).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerInfo {
+    pub quality: Quality,
+    /// Стример публикует экономный слой (иначе выбирать нечего).
+    pub has_low: bool,
+    /// Сейчас показываем экономный слой.
+    pub low: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +220,7 @@ impl Default for VoiceState {
             watching: Vec::new(),
             metrics: None,
             stream_paused: HashMap::new(),
+            stream_layers: HashMap::new(),
         }
     }
 }
@@ -274,11 +292,16 @@ pub fn spawn(
         cap_tx,
         generation: 0,
         last_video_bytes: None,
+        video_sent_by_ssrc: HashMap::new(),
         stats_n: 0,
         audio_counts: (0, 0),
         video,
         watching: HashSet::new(),
         receivers: HashMap::new(),
+        recv: HashMap::new(),
+        quality: HashMap::new(),
+        auto: HashMap::new(),
+        recv_prev: HashMap::new(),
         views: HashMap::new(),
         overlay: false,
         counters: Default::default(),
@@ -319,6 +342,8 @@ struct Engine {
     /// Поколение захвата: растёт при каждом старте/смене источника.
     generation: u64,
     last_video_bytes: Option<(u64, Instant)>,
+    /// Байты, отправленные каждым исходящим видеопотоком (ssrc) на прошлом замере — чтобы узнать живой.
+    video_sent_by_ssrc: HashMap<u32, u64>,
     stats_n: u64,
     /// Входящее аудио (потеряно, принято) на прошлом замере — для доли потерь.
     audio_counts: (i64, u64),
@@ -328,6 +353,14 @@ struct Engine {
     watching: HashSet<String>,
     /// Задачи приёма кадров по identity.
     receivers: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// Что принимает приёмник: identity → (sid публикации, id rtc-трека, слой, с какого момента).
+    recv: HashMap<String, (TrackSid, String, Layer, Instant)>,
+    /// Выбор качества по стримерам (переживает переподключение и выход из канала).
+    quality: HashMap<String, Quality>,
+    /// Авто-выбор слоя по стримерам.
+    auto: HashMap<String, AutoLayer>,
+    /// Счётчики входящего видео на прошлом замере: id rtc-трека → (потеряно, принято, заморозок).
+    recv_prev: HashMap<String, (i64, u64, u32)>,
     /// Последний вид из UI: (видна, ширина, высота) — повторно применяется после переподписки.
     views: HashMap<String, (bool, u32, u32)>,
     /// Оверлей F3 открыт.
@@ -355,6 +388,8 @@ struct Streaming {
     /// Что транслируем (для пересоздания захвата при смене размера окна).
     source_id: SourceId,
     publication: Option<LocalTrackPublication>,
+    /// Экономный слой: источник и его публикация (None — слоя нет).
+    low: Option<(NativeVideoSource, Option<LocalTrackPublication>)>,
     /// Звук окна/системы (фаза 5); None — не передаётся.
     audio: Option<StreamSound>,
 }
@@ -567,6 +602,7 @@ impl Engine {
     async fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Join(ch) => {
+                self.hang_up_dm(Some(&ch));
                 self.rejoin = None;
                 self.stop_stream().await;
                 self.leave().await;
@@ -574,6 +610,7 @@ impl Engine {
                 self.join(ch, 0).await;
             }
             Cmd::Leave => {
+                self.hang_up_dm(None);
                 self.rejoin = None;
                 let was_in = self.room.is_some();
                 self.stop_stream().await;
@@ -664,6 +701,14 @@ impl Engine {
             }
             Cmd::DumpStats => self.dump_stats = true,
             Cmd::Watch { identity, on } => self.set_watching(&identity, on),
+            Cmd::SetStreamQuality { identity, quality } => {
+                log::info!("трансляция {identity}: качество {}", quality.label());
+                self.quality.insert(identity.clone(), quality);
+                // «Авто» начинает с исходного и заново копит замеры.
+                self.auto.remove(&identity);
+                self.sync_subscriptions();
+                self.publish_layers();
+            }
             Cmd::StreamView { identity, visible, width, height } => {
                 self.views.insert(identity.clone(), (visible, width, height));
                 self.apply_view(&identity);
@@ -718,8 +763,25 @@ impl Engine {
         }
     }
 
+    /// Уходим из звонка в ЛС (выход или переход в другой канал) — сказать серверу сразу: отменить/отклонить звонок,
+    /// не дожидаясь вебхука LiveKit.
+    fn hang_up_dm(&self, next: Option<&Channel>) {
+        let cur = self.state.lock().unwrap().channel.clone();
+        if let Some(cur) = cur
+            && crate::dms::is_dm(&cur)
+            && next.is_none_or(|n| n.id != cur.id)
+        {
+            let api = self.api.clone();
+            tokio::spawn(async move {
+                if let Err(e) = api.dm_hang_up(cur.id).await {
+                    log::warn!("звонок {}: не удалось положить трубку: {e}", cur.id);
+                }
+            });
+        }
+    }
+
     async fn try_join(&mut self, ch: &Channel) -> anyhow::Result<()> {
-        let join = self.api.join(ch.id).await?;
+        let join = if crate::dms::is_dm(ch) { self.api.dm_call(ch.id).await? } else { self.api.join(ch.id).await? };
         let mut opts = RoomOptions::default();
         // Подписки — вручную: голос всегда, трансляции (видео + звук) — только по «Смотреть» (канал зрителя не тратится).
         opts.auto_subscribe = false;
@@ -751,6 +813,12 @@ impl Engine {
                 Ok(p) => st.publication = Some(p),
                 Err(e) => log::error!("повторная публикация трансляции: {e}"),
             }
+            if let Some((src, p)) = &mut st.low {
+                match stream::publish_low(&room, src).await {
+                    Ok(np) => *p = Some(np),
+                    Err(e) => log::warn!("повторная публикация экономного слоя: {e}"),
+                }
+            }
             if let Some(a) = &mut st.audio {
                 match stream::publish_audio(&room, &a.source).await {
                     Ok(p) => a.publication = Some(p),
@@ -772,6 +840,9 @@ impl Engine {
         self.mic = None;
         if let Some(st) = &mut self.stream {
             st.publication = None;
+            if let Some((_, p)) = &mut st.low {
+                *p = None;
+            }
             if let Some(a) = &mut st.audio {
                 a.publication = None;
             }
@@ -787,6 +858,9 @@ impl Engine {
         log::info!("выход: микрофонный трек отпущен");
         if let Some(st) = &mut self.stream {
             st.publication = None;
+            if let Some((_, p)) = &mut st.low {
+                *p = None;
+            }
             if let Some(a) = &mut st.audio {
                 a.publication = None;
             }
@@ -906,13 +980,23 @@ impl Engine {
                     }
                     RemoteTrack::Video(v) => {
                         let id = participant.identity().as_str().to_string();
-                        if publication.source() == TrackSource::Screenshare && self.watching.contains(&id) {
-                            log::info!("смотрим трансляцию {id}");
+                        let layer = layer_of(&publication);
+                        if publication.source() == TrackSource::Screenshare
+                            && self.watching.contains(&id)
+                            && layer == self.target_layer(&id)
+                        {
+                            log::info!("смотрим трансляцию {id} ({layer:?})");
+                            let rtc = v.rtc_track().id();
+                            // Старый приёмник (другой слой) заменяется; его текстура остаётся до первого нового кадра.
                             if let Some(old) = self.receivers.insert(id.clone(), self.video.spawn_receiver(id.clone(), v)) {
                                 old.abort();
                             }
+                            self.recv.insert(id.clone(), (publication.sid(), rtc, layer, Instant::now()));
                             self.apply_view(&id);
-                        } else {
+                            self.publish_layers();
+                            // Прежний слой больше не нужен.
+                            self.sync_subscriptions();
+                        } else if !self.wants(&id, &publication) {
                             // Пришло то, что уже не нужно (успели нажать «Перестать смотреть»).
                             publication.set_subscribed(false);
                         }
@@ -921,16 +1005,26 @@ impl Engine {
                 self.refresh_peers(false);
             }
             RoomEvent::TrackPublished { publication, participant } => {
-                log::info!("{} опубликовал {:?}", participant.identity(), publication.source());
+                log::info!("{} опубликовал {:?} «{}»", participant.identity(), publication.source(), publication.name());
                 if publication.source() == TrackSource::Screenshare {
-                    self.play(Sound::StreamStart);
+                    if layer_of(&publication) == Layer::High {
+                        self.play(Sound::StreamStart);
+                    } else {
+                        // Появился экономный слой: в «Экономном» перейти на него.
+                        self.sync_subscriptions();
+                        self.publish_layers();
+                    }
                 }
                 self.sync_subscription(participant.identity().as_str(), &publication);
                 self.refresh_peers(false);
             }
             RoomEvent::TrackUnpublished { publication, participant } => {
-                log::info!("{} снял {:?}", participant.identity(), publication.source());
-                if publication.source() == TrackSource::Screenshare {
+                log::info!("{} снял {:?} «{}»", participant.identity(), publication.source(), publication.name());
+                if publication.source() == TrackSource::Screenshare && layer_of(&publication) == Layer::Low {
+                    // Экономного слоя больше нет — остаётся исходный.
+                    self.sync_subscriptions();
+                    self.publish_layers();
+                } else if publication.source() == TrackSource::Screenshare {
                     self.play(Sound::StreamStop);
                     // Трансляция закончилась — перестаём «смотреть» (новую стример покажет заново, как в Discord).
                     self.set(|s| {
@@ -941,8 +1035,15 @@ impl Engine {
                 self.refresh_peers(false);
             }
             RoomEvent::TrackUnsubscribed { publication, participant, .. } => {
-                if publication.source() == TrackSource::Screenshare {
-                    self.stop_receiver(participant.identity().as_str());
+                let id = participant.identity().as_str().to_string();
+                // Снят прежний слой после переключения — приёмник уже на новом, не трогаем.
+                if publication.source() == TrackSource::Screenshare
+                    && self.recv.get(&id).is_some_and(|(sid, ..)| *sid == publication.sid())
+                {
+                    self.stop_receiver(&id);
+                    if self.watching.contains(&id) {
+                        self.sync_subscriptions();
+                    }
                 }
                 self.refresh_peers(false);
             }
@@ -1050,6 +1151,8 @@ impl Engine {
         self.log_inbound_video(&stats.subscriber_stats);
         self.log_inbound_video(&stats.publisher_stats);
         self.log_audio(&stats.publisher_stats);
+        let all: Vec<&RtcStats> = stats.publisher_stats.iter().chain(stats.subscriber_stats.iter()).collect();
+        self.update_layers(&all);
         let rtt = stats
             .publisher_stats
             .iter()
@@ -1115,7 +1218,8 @@ impl Engine {
                 }
                 self.generation += 1;
                 self.last_video_bytes = None;
-                let r = tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, st.hw, self.generation, &self.cap_tx));
+                let low = st.low.as_ref().map(|(s, _)| s.clone());
+                let r = tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, low.as_ref(), st.hw, self.generation, &self.cap_tx));
                 match r {
                     Ok(c) => {
                         st.capture = Some(c);
@@ -1163,7 +1267,17 @@ impl Engine {
                 return;
             }
         };
-        log::info!("трансляция: {source:?} «{title}», {preset:?}, энкодер {}", started.encoder);
+        let low_pub = match &started.low {
+            Some(l) => match stream::publish_low(room, l).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    log::warn!("публикация экономного слоя: {e} — только основной");
+                    None
+                }
+            },
+            None => None,
+        };
+        log::info!("трансляция: {source:?} «{title}», {preset:?}, энкодер {}, экономный слой {}", started.encoder, low_pub.is_some());
         if !restarting {
             self.play(Sound::StreamStart);
         }
@@ -1175,6 +1289,7 @@ impl Engine {
             hw: started.hw,
             source_id: source,
             publication: Some(publication),
+            low: started.low.map(|s| (s, low_pub)),
             audio: None,
         });
         self.set(|s| {
@@ -1267,6 +1382,11 @@ impl Engine {
                 log::warn!("снятие звука трансляции: {e}");
             }
         }
+        if let (Some((_, Some(p))), Some((room, _))) = (st.low.take(), &self.room)
+            && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await
+        {
+            log::warn!("снятие экономного слоя: {e}");
+        }
         if let (Some(p), Some((room, _))) = (st.publication.take(), &self.room)
             && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await {
                 log::warn!("снятие трансляции: {e}");
@@ -1294,7 +1414,8 @@ impl Engine {
         self.generation += 1;
         self.last_video_bytes = None;
         let Some(st) = self.stream.as_mut() else { return };
-        match tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, true, self.generation, &self.cap_tx)) {
+        let low = st.low.as_ref().map(|(s, _)| s.clone());
+        match tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, low.as_ref(), true, self.generation, &self.cap_tx)) {
             Ok(c) => {
                 st.capture = Some(c);
                 log::info!("трансляция: энкодер пересоздан под {width}×{height}");
@@ -1490,10 +1611,20 @@ impl Engine {
         if self.stream.is_none() {
             return;
         }
-        let Some(o) = stats.iter().find_map(|s| match s {
-            RtcStats::OutboundRtp(o) if o.stream.kind == "video" => Some(o),
-            _ => None,
-        }) else {
+        // Исходящих видео может быть несколько: после переподключения (перезапуск SFU) или смены пресета старый поток ещё
+        // числится, с застывшими счётчиками и 0×0. Берём тот, что отправил больше всего с прошлого замера.
+        let prev = std::mem::take(&mut self.video_sent_by_ssrc);
+        let outs: Vec<_> = stats
+            .iter()
+            .filter_map(|s| match s {
+                RtcStats::OutboundRtp(o) if o.stream.kind == "video" => Some(o),
+                _ => None,
+            })
+            .collect();
+        for o in &outs {
+            self.video_sent_by_ssrc.insert(o.stream.ssrc, o.sent.bytes_sent);
+        }
+        let Some(o) = pick_active_outbound(&outs, &prev) else {
             return;
         };
         let now = Instant::now();
@@ -1513,8 +1644,9 @@ impl Engine {
         let enc = o.outbound.encoder_implementation.clone();
         let fps = o.outbound.frames_per_second;
         let lim = format!("{:?}", o.outbound.quality_limitation_reason);
+        // потери — из отчёта SFU именно об этом потоке
         let loss = stats.iter().find_map(|s| match s {
-            RtcStats::RemoteInboundRtp(r) if r.stream.kind == "video" => Some(r.remote_inbound.fraction_lost),
+            RtcStats::RemoteInboundRtp(r) if r.stream.kind == "video" && r.stream.ssrc == o.stream.ssrc => Some(r.remote_inbound.fraction_lost),
             _ => None,
         });
         let enc_ms = if o.outbound.frames_encoded > 0 {
@@ -1608,7 +1740,13 @@ impl Engine {
     /// Нужна ли нам эта публикация: голос — всегда, трансляция (видео и её звук) — только если смотрим.
     fn wants(&self, identity: &str, publication: &RemoteTrackPublication) -> bool {
         match publication.source() {
-            TrackSource::Screenshare | TrackSource::ScreenshareAudio => self.watching.contains(identity),
+            // Видео трансляции — только выбранный слой; при переключении прежний держим, пока не придёт новый (без чёрного экрана).
+            TrackSource::Screenshare => {
+                self.watching.contains(identity)
+                    && (layer_of(publication) == self.target_layer(identity)
+                        || self.recv.get(identity).is_some_and(|(sid, ..)| *sid == publication.sid()))
+            }
+            TrackSource::ScreenshareAudio => self.watching.contains(identity),
             _ => publication.kind() == TrackKind::Audio,
         }
     }
@@ -1639,6 +1777,7 @@ impl Engine {
         if !on {
             self.stop_receiver(identity);
             self.views.remove(identity);
+            self.auto.remove(identity);
         }
         self.sync_subscriptions();
         self.publish_watching();
@@ -1673,6 +1812,8 @@ impl Engine {
         self.stop_receivers();
         self.watching.clear();
         self.views.clear();
+        self.auto.clear();
+        self.recv_prev.clear();
         self.publish_watching();
     }
 
@@ -1680,12 +1821,97 @@ impl Engine {
         let mut list: Vec<String> = self.watching.iter().cloned().collect();
         list.sort();
         self.set(|s| s.watching = list);
+        self.publish_layers();
+    }
+
+    // ---------------------------------------------------------------- слои трансляций (свой simulcast)
+
+    fn remote(&self, identity: &str) -> Option<RemoteParticipant> {
+        let (room, _) = self.room.as_ref()?;
+        room.remote_participants().into_iter().find(|(id, _)| id.as_str() == identity).map(|(_, p)| p)
+    }
+
+    /// Стример публикует экономный слой.
+    fn has_low(&self, identity: &str) -> bool {
+        self.remote(identity).is_some_and(|p| {
+            p.track_publications().values().any(|t| t.source() == TrackSource::Screenshare && layer_of(t) == Layer::Low)
+        })
+    }
+
+    /// Какой слой показывать: выбор человека, в «Авто» — по качеству приёма; нет экономного — исходный.
+    fn target_layer(&self, identity: &str) -> Layer {
+        if !self.has_low(identity) {
+            return Layer::High;
+        }
+        match self.quality.get(identity).copied().unwrap_or_default() {
+            Quality::High => Layer::High,
+            Quality::Low => Layer::Low,
+            Quality::Auto => self.auto.get(identity).map_or(Layer::High, AutoLayer::layer),
+        }
+    }
+
+    fn publish_layers(&self) {
+        let map: HashMap<String, LayerInfo> = self
+            .watching
+            .iter()
+            .map(|id| {
+                let info = LayerInfo {
+                    quality: self.quality.get(id).copied().unwrap_or_default(),
+                    has_low: self.has_low(id),
+                    low: self.recv.get(id).is_some_and(|(_, _, l, _)| *l == Layer::Low),
+                };
+                (id.clone(), info)
+            })
+            .collect();
+        self.set(|s| s.stream_layers = map);
+    }
+
+    /// Замер приёма просматриваемых трансляций → авто-выбор слоя.
+    fn update_layers(&mut self, stats: &[&RtcStats]) {
+        let now = Instant::now();
+        let paused: HashSet<String> = self.state.lock().unwrap().stream_paused.keys().cloned().collect();
+        // Первые секунды после подписки (SFU начинает пересылку с ключевого кадра) — всплеск потерь, не про сеть.
+        let recv: Vec<(String, String, bool)> = self
+            .recv
+            .iter()
+            .map(|(id, (_, rtc, _, since))| (id.clone(), rtc.clone(), since.elapsed() < LAYER_SETTLE))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut switched = false;
+        for (id, rtc, settling) in recv {
+            let Some(i) = stats.iter().find_map(|s| match s {
+                RtcStats::InboundRtp(i) if i.stream.kind == "video" && i.inbound.track_identifier == rtc => Some(i),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let cur = (i.received.packets_lost, i.received.packets_received, i.inbound.freeze_count);
+            seen.insert(rtc.clone());
+            let Some(prev) = self.recv_prev.insert(rtc, cur) else { continue };
+            // Скрыта (на паузе у SFU) или стример свернул окно — кадров нет не из-за сети.
+            let visible = self.views.get(&id).is_none_or(|v| v.0);
+            let auto = self.quality.get(&id).copied().unwrap_or_default() == Quality::Auto;
+            if settling || !visible || paused.contains(&id) || !auto || !self.has_low(&id) {
+                continue;
+            }
+            let s = layers::sample(prev, cur);
+            if let Some(to) = self.auto.entry(id.clone()).or_default().update(now, s) {
+                log::info!("трансляция {id}: авто → {to:?} (потери {:.1} %, заморозок {})", s.loss * 100.0, s.freezes);
+                switched = true;
+            }
+        }
+        self.recv_prev.retain(|k, _| seen.contains(k));
+        if switched {
+            self.sync_subscriptions();
+            self.publish_layers();
+        }
     }
 
     fn stop_receiver(&mut self, identity: &str) {
         if let Some(h) = self.receivers.remove(identity) {
             h.abort();
         }
+        self.recv.remove(identity);
         self.video.remove(identity);
     }
 
@@ -1693,6 +1919,7 @@ impl Engine {
         for (_, h) in self.receivers.drain() {
             h.abort();
         }
+        self.recv.clear();
         self.video.clear();
     }
 
@@ -1743,7 +1970,8 @@ impl Engine {
                     Some(RemoteTrack::Video(v)) => v.rtc_track().id(),
                     None => continue,
                 };
-                out.insert(id, format!("{name}: {}", what(publication.source())));
+                let low = if layer_of(publication) == Layer::Low { " (экономное)" } else { "" };
+                out.insert(id, format!("{name}: {}{low}", what(publication.source())));
             }
         }
         out
@@ -1793,6 +2021,11 @@ impl Engine {
     }
 }
 
+/// Слой трансляции по имени трека: «screen-low» — экономный, остальное — исходный.
+fn layer_of(publication: &RemoteTrackPublication) -> Layer {
+    if publication.name() == stream::LOW_TRACK { Layer::Low } else { Layer::High }
+}
+
 /// Отключение, после которого не переподключаемся (текст для человека); `None` — обрыв связи, вернуться в канал.
 fn final_disconnect(reason: livekit::DisconnectReason) -> Option<&'static str> {
     use livekit::DisconnectReason as R;
@@ -1804,9 +2037,41 @@ fn final_disconnect(reason: livekit::DisconnectReason) -> Option<&'static str> {
     }
 }
 
+/// Живой исходящий видеопоток: больше всех отправил с прошлого замера; первый замер — с ненулевым размером кадра и
+/// наибольшим счётчиком байт. Застывшие потоки (после переподключения) отправляют 0.
+fn pick_active_outbound<'a>(outs: &[&'a OutboundRtpStats], prev: &HashMap<u32, u64>) -> Option<&'a OutboundRtpStats> {
+    let delta = |o: &OutboundRtpStats| prev.get(&o.stream.ssrc).map(|p| o.sent.bytes_sent.saturating_sub(*p));
+    if outs.iter().any(|o| delta(o).is_some()) {
+        outs.iter().copied().max_by_key(|o| (delta(o).unwrap_or(0), o.outbound.frame_width > 0))
+    } else {
+        outs.iter().copied().max_by_key(|o| (o.outbound.frame_width > 0, o.sent.bytes_sent))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn out(ssrc: u32, bytes: u64, w: u32) -> OutboundRtpStats {
+        let mut o = OutboundRtpStats::default();
+        o.stream.ssrc = ssrc;
+        o.sent.bytes_sent = bytes;
+        o.outbound.frame_width = w;
+        o
+    }
+
+    #[test]
+    fn active_outbound_after_reconnect() {
+        // старый поток застыл с большим счётчиком, новый растёт
+        let (old, new) = (out(1, 9_000_000, 0), out(2, 50_000, 2560));
+        let none = HashMap::new();
+        assert_eq!(pick_active_outbound(&[&old, &new], &none).unwrap().stream.ssrc, 2, "первый замер: 0×0 не берём");
+        let prev = HashMap::from([(1, 9_000_000), (2, 10_000)]);
+        assert_eq!(pick_active_outbound(&[&old, &new], &prev).unwrap().stream.ssrc, 2);
+        let only = out(3, 100, 1920);
+        assert_eq!(pick_active_outbound(&[&only], &prev).unwrap().stream.ssrc, 3, "новый ssrc без прошлого замера");
+        assert!(pick_active_outbound(&[], &prev).is_none());
+    }
 
     #[test]
     fn removed_from_room_is_final() {

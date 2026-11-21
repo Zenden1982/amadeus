@@ -416,9 +416,8 @@ impl Chat {
     }
 
     fn on_server(&mut self, e: ServerEvent) {
-        if !matches!(e, ServerEvent::MessageCreated { .. }) {
-            self.events_out.push(e.clone());
-        }
+        // всё, включая сообщения (непрочитанные, ЛС), — приложению
+        self.events_out.push(e.clone());
         match e {
             ServerEvent::Hello | ServerEvent::Resync => {
                 self.online = true;
@@ -734,9 +733,10 @@ impl Chat {
                 if reached_start && msgs.is_empty() && outbox.is_empty() {
                     // Пустой канал — кот и приглашение написать первым.
                     ui.add_space((ui.available_height() * 0.25).max(20.0));
-                    kit::cat_state(ui, kit::Cat::Peek, "Сообщений пока нет", &format!("Напиши первым в #{}", ch.name), None);
+                    let hint = if crate::dms::is_dm(ch) { format!("Напиши {} первым", ch.name) } else { format!("Напиши первым в #{}", ch.name) };
+                    kit::cat_state(ui, kit::Cat::Peek, "Сообщений пока нет", &hint, None);
                 } else if reached_start {
-                    channel_intro(ui, &ch.name);
+                    channel_intro(ui, &ch.name, crate::dms::is_dm(ch));
                 } else {
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
                     if loading_older {
@@ -967,7 +967,7 @@ impl Chat {
                         .font(t::font(15.0))
                         .margin(Margin::symmetric(4, 6))
                         .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
-                        .hint_text(RichText::new(format!("Написать в #{}", ch.name)).color(t::p().text_muted));
+                        .hint_text(RichText::new(if crate::dms::is_dm(ch) { format!("Написать {}", ch.name) } else { format!("Написать в #{}", ch.name) }).color(t::p().text_muted));
                     egui::ScrollArea::vertical().id_salt(("composer-scroll", ch.id)).max_height(200.0).min_scrolled_height(0.0).max_width(w).show(ui, |ui| {
                         ui.add(edit);
                     });
@@ -1127,17 +1127,23 @@ fn link(ui: &mut Ui, text: &str) -> egui::Response {
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn channel_intro(ui: &mut Ui, name: &str) {
+fn channel_intro(ui: &mut Ui, name: &str, dm: bool) {
     ui.add_space(24.0);
     ui.horizontal(|ui| {
         ui.add_space(16.0);
         ui.vertical(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
             ui.painter().circle_filled(r.center(), 32.0, t::p().accent_soft);
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, egui_phosphor::fill::HASH, t::icon_fill(32.0), t::p().accent);
+            let icon = if dm { egui_phosphor::fill::CHAT_CIRCLE } else { egui_phosphor::fill::HASH };
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, t::icon_fill(32.0), t::p().accent);
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("Добро пожаловать в #{name}")).font(t::xbold(24.0)));
-            ui.label(RichText::new(format!("Это начало канала #{name}.")).size(14.0).color(t::p().text_muted));
+            if dm {
+                ui.label(RichText::new(name).font(t::xbold(24.0)));
+                ui.label(RichText::new(format!("Это начало вашей переписки с {name}.")).size(14.0).color(t::p().text_muted));
+            } else {
+                ui.label(RichText::new(format!("Добро пожаловать в #{name}")).font(t::xbold(24.0)));
+                ui.label(RichText::new(format!("Это начало канала #{name}.")).size(14.0).color(t::p().text_muted));
+            }
         });
     });
     ui.add_space(12.0);

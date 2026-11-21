@@ -42,6 +42,8 @@ pub mod limits {
     pub const FRIEND_REQUESTS_PENDING_MAX: usize = 50;
     /// Друзей у одного человека.
     pub const FRIENDS_MAX: usize = 500;
+    /// Сколько звонок в ЛС звонит без ответа, секунд.
+    pub const CALL_RING_SECS: u64 = 45;
 }
 
 /// Права на сервере — битовая маска (`Role::permissions`).
@@ -148,6 +150,9 @@ pub struct User {
     /// Ключ картинки (`GET /images/{key}`).
     #[serde(default)]
     pub avatar: Option<String>,
+    /// Писать в ЛС могут и люди с общих серверов (по умолчанию — только друзья).
+    #[serde(default)]
+    pub dm_from_servers: bool,
 }
 
 /// Человек, каким его видят другие.
@@ -289,6 +294,9 @@ pub struct ChannelPlace {
 pub struct UpdateMeRequest {
     #[serde(default)]
     pub display_name: Option<String>,
+    /// См. `User::dm_from_servers`.
+    #[serde(default)]
+    pub dm_from_servers: Option<bool>,
 }
 
 /// `GET /invites/{code}` без входа: куда зовут.
@@ -478,6 +486,65 @@ pub enum ServerEvent {
     FriendsChanged,
     /// Друг появился в сети или вышел (открыт ли у него поток событий).
     Presence { user_id: i64, online: bool },
+    /// Я прочитал канал до `last_read_id` (с другого моего клиента или этим же) — сбросить непрочитанные.
+    ReadState { channel_id: i64, last_read_id: i64 },
+    /// Звонок в ЛС начался, изменился или закончился (`call: None`).
+    Call { channel_id: i64, call: Option<CallInfo> },
+}
+
+/// Личный диалог (ЛС): канал на двоих. Сообщения — как у текстового канала: `/channels/{id}/messages`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DmChannel {
+    /// id канала.
+    pub id: i64,
+    /// Собеседник.
+    pub user: PublicUser,
+    /// Последнее сообщение (для сортировки), None — диалог пуст.
+    #[serde(default)]
+    pub last_message_id: Option<i64>,
+    /// Время последнего сообщения или открытия диалога.
+    pub last_at: i64,
+    /// Идёт ли звонок.
+    #[serde(default)]
+    pub call: Option<CallInfo>,
+}
+
+/// `POST /dms` — открыть (или найти) диалог с человеком.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenDmRequest {
+    pub user_id: i64,
+}
+
+/// Звонок в ЛС. Комната LiveKit — `dm-{channel_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallInfo {
+    pub channel_id: i64,
+    /// Кто позвонил.
+    pub caller_id: i64,
+    pub started_at: i64,
+    /// Звонит: второй ещё не ответил и не отклонил.
+    pub ringing: bool,
+    /// Кто сейчас в комнате звонка.
+    #[serde(default)]
+    pub participants: Vec<i64>,
+}
+
+/// Непрочитанное в канале (текстовом или ЛС). `GET /unread` отдаёт только каналы, где что-то есть.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadChannel {
+    pub channel_id: i64,
+    /// Сервер канала; None — ЛС.
+    #[serde(default)]
+    pub server_id: Option<i64>,
+    /// Сколько чужих сообщений не прочитано.
+    pub count: u32,
+    pub last_message_id: i64,
+}
+
+/// `POST /channels/{id}/read` — прочитано до этого сообщения включительно.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadRequest {
+    pub message_id: i64,
 }
 
 /// Друг (заявка принята).

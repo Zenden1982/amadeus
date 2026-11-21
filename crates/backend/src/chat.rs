@@ -75,14 +75,31 @@ impl From<&AttachmentRow> for Attachment {
     }
 }
 
-/// Канал существует и он текстовый.
-/// Текстовый канал сервера, где ты участник; возвращает id сервера. Чужой — NotFound.
-async fn text_channel(state: &AppState, id: i64, user_id: i64) -> AppResult<i64> {
-    let (m, ch) = perm::channel_member(&state.inner.db, id, user_id).await?;
+/// Куда относится чат: текстовый канал сервера или ЛС.
+pub(crate) struct ChatTarget {
+    /// Кому рассылать новые сообщения.
+    pub audience: Audience,
+    /// ЛС: (собеседник, кто открыл диалог).
+    pub dm: Option<(i64, i64)>,
+}
+
+/// Текстовый канал сервера, где ты участник, или твой ЛС. Чужой — NotFound.
+pub(crate) async fn chat_target(state: &AppState, id: i64, user_id: i64) -> AppResult<ChatTarget> {
+    let db = &state.inner.db;
+    let ch: crate::db::ChannelRow = sqlx::query_as(crate::db::CHANNEL_SELECT_BY_ID)
+        .bind(id)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if ch.server_id.is_none() {
+        let (other, opened_by) = crate::dm::dm_member(db, id, user_id).await?.ok_or(AppError::NotFound)?;
+        return Ok(ChatTarget { audience: Audience::Users(vec![user_id, other]), dm: Some((other, opened_by)) });
+    }
+    let (m, ch) = perm::channel_member(db, id, user_id).await?;
     if ch.kind != "text" {
         return Err(AppError::BadRequest("это не текстовый канал".into()));
     }
-    Ok(m.server_id)
+    Ok(ChatTarget { audience: Audience::Server(m.server_id), dm: None })
 }
 
 /// Строки сообщений → `Message` с вложениями (одним запросом на всю страницу).
@@ -142,7 +159,7 @@ pub async fn list_messages(
     q: Result<Query<HistoryQuery>, QueryRejection>,
 ) -> AppResult<Json<Vec<Message>>> {
     let Query(q) = q.map_err(|e| AppError::BadRequest(e.body_text()))?;
-    text_channel(&state, id, user.id).await?;
+    chat_target(&state, id, user.id).await?;
     let limit = q
         .limit
         .unwrap_or(limits::HISTORY_PAGE)
@@ -200,7 +217,12 @@ pub async fn send_message(
     Path(id): Path<i64>,
     ApiJson(req): ApiJson<SendMessageRequest>,
 ) -> AppResult<(StatusCode, Json<Message>)> {
-    let server_id = text_channel(&state, id, user.id).await?;
+    let target = chat_target(&state, id, user.id).await?;
+    if let Some((other, opened_by)) = target.dm
+        && !crate::dm::can_write(&state.inner.db, user.id, other, Some(opened_by)).await?
+    {
+        return Err(crate::dm::not_allowed());
+    }
     state
         .inner
         .chat_limiter
@@ -254,9 +276,11 @@ pub async fn send_message(
         }
     }
     tx.commit().await?;
+    // своё сообщение — прочитано
+    crate::dm::mark_read(&state.inner.db, user.id, id, mid).await?;
 
     let msg = load_message(&state, id, mid).await?;
-    publish(&state, Audience::Server(server_id), ServerEvent::MessageCreated { message: msg.clone() });
+    publish(&state, target.audience, ServerEvent::MessageCreated { message: msg.clone() });
     Ok((StatusCode::CREATED, Json(msg)))
 }
 
@@ -387,13 +411,13 @@ pub async fn get_attachment(
         // не отправлено — видит только загрузивший
         None if uploader != user.id => return Err(AppError::NotFound),
         None => {}
-        // отправлено — только участникам сервера, где канал сообщения
+        // отправлено — только участникам сервера, где канал сообщения (или двоим в ЛС)
         Some(mid) => {
             let channel_id: i64 = sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ?")
                 .bind(mid)
                 .fetch_one(&state.inner.db)
                 .await?;
-            perm::channel_member(&state.inner.db, channel_id, user.id).await?;
+            chat_target(&state, channel_id, user.id).await?;
         }
     }
     let bytes = match tokio::fs::read(storage_path(&state, &key)).await {

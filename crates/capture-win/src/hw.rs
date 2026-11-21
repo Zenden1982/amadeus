@@ -372,6 +372,11 @@ struct MfEncoder {
     out_frames: AtomicU32,
     out_keys: AtomicU32,
     out_bytes: AtomicU64,
+    /// Сумма QP и число кадров, у которых энкодер сообщил QP (`MFSampleExtension_VideoEncodeQP`).
+    out_qp_sum: AtomicU64,
+    out_qp_n: AtomicU32,
+    /// Разбор QP из потока (SPS/PPS между кадрами).
+    qp_parser: Mutex<crate::h264qp::QpParser>,
 }
 
 impl MfEncoder {
@@ -424,15 +429,35 @@ impl MfEncoder {
                     }
                 };
                 set(&CODECAPI_AVLowLatencyMode, variant_bool(true), "LowLatencyMode");
-                // VBR с низкой задержкой: статичный экран не забивает канал «пустым» битрейтом (CBR набивал 6 Мбит/с).
-                if c.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(eAVEncCommonRateControlMode_LowDelayVBR.0 as u32)).is_err() {
-                    set(&CODECAPI_AVEncCommonRateControlMode, variant_u32(eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32), "PeakConstrainedVBR");
+                // Опыты (AMADEUS_ENC_RC=cbr|pcvbr|uvbr|ldvbr, AMADEUS_ENC_MAXQP=N): режим контроля битрейта и потолок QP.
+                // CBR: только он следует цели WebRTC на ходу. VBR (LowDelay/PeakConstrained/Unconstrained) у NVIDIA MFT смену
+                // MeanBitRate после старта не применяет: при цели 12/4/2 Мбит/с одинаково ~1 Мбит/с и QP 46–50 в динамичных
+                // сценах (замер rcprobe 2026-11-21). Для опытов: AMADEUS_ENC_RC=ldvbr|pcvbr|uvbr, AMADEUS_ENC_MAXQP=N.
+                let rc = match std::env::var("AMADEUS_ENC_RC").as_deref() {
+                    Ok("ldvbr") => eAVEncCommonRateControlMode_LowDelayVBR,
+                    Ok("pcvbr") => eAVEncCommonRateControlMode_PeakConstrainedVBR,
+                    Ok("uvbr") => eAVEncCommonRateControlMode_UnconstrainedVBR,
+                    _ => eAVEncCommonRateControlMode_CBR,
+                };
+                set(&CODECAPI_AVEncCommonRateControlMode, variant_u32(rc.0 as u32), "RateControlMode");
+                if let Some(q) = std::env::var("AMADEUS_ENC_MAXQP").ok().and_then(|v| v.parse::<u32>().ok()) {
+                    log::info!("{name}: MaxQP из AMADEUS_ENC_MAXQP: {q}");
+                    set(&CODECAPI_AVEncVideoMaxQP, variant_u32(q), "MaxQP");
                 }
                 set(&CODECAPI_AVEncCommonMaxBitRate, variant_u32(start_bitrate.saturating_mul(3) / 2), "MaxBitRate");
                 set(&CODECAPI_AVEncCommonMeanBitRate, variant_u32(start_bitrate), "MeanBitRate");
                 set(&CODECAPI_AVEncCommonBufferSize, variant_u32(start_bitrate / 2), "BufferSize");
                 set(&CODECAPI_AVEncMPVGOPSize, variant_u32(fps * 10), "GOPSize");
                 set(&CODECAPI_AVEncMPVDefaultBPictureCount, variant_u32(0), "BPictureCount");
+                if crate::diag::on() {
+                    let sup = |g: &GUID| if c.IsSupported(g).is_ok() { "да" } else { "нет" };
+                    log::info!(
+                        "ДИАГ энкодер {name}: поддерживает MaxQP {}, MinQP {}, QualityVsSpeed {}",
+                        sup(&CODECAPI_AVEncVideoMaxQP),
+                        sup(&CODECAPI_AVEncVideoMinQP),
+                        sup(&CODECAPI_AVEncCommonQualityVsSpeed)
+                    );
+                }
             }
 
             // Тип выхода (до входа — так требуют энкодеры).
@@ -506,6 +531,9 @@ impl MfEncoder {
                 out_frames: AtomicU32::new(0),
                 out_keys: AtomicU32::new(0),
                 out_bytes: AtomicU64::new(0),
+                out_qp_sum: AtomicU64::new(0),
+                out_qp_n: AtomicU32::new(0),
+                qp_parser: Mutex::new(Default::default()),
             })
         }
     }
@@ -600,12 +628,30 @@ impl MfEncoder {
             }
             let Some(sample) = sample else { return Ok(()) };
             let key = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+            // QP кадра — мерило качества при недоборе битрейта: из атрибута образца, а если энкодер его не даёт (NVENC) —
+            // из заголовка среза (только в диагностике: разбор стоит копейки, но незачем).
+            let attr_qp = sample.GetUINT64(&MFSampleExtension_VideoEncodeQP).ok().map(|q| (q & 0xFFFF) as i32);
             let ts = sample.GetSampleTime().unwrap_or(0) / 10;
             let mb = sample.ConvertToContiguousBuffer().map_err(e("ContiguousBuffer"))?;
             let mut p: *mut u8 = std::ptr::null_mut();
             let mut len = 0u32;
             mb.Lock(&mut p, None, Some(&mut len)).map_err(e("Lock"))?;
             let data = std::slice::from_raw_parts(p, len as usize);
+            let qp = attr_qp.or_else(|| {
+                if !crate::diag::on() {
+                    return None;
+                }
+                let mut parser = self.qp_parser.lock().unwrap_or_else(|e| e.into_inner());
+                // энкодер может не повторять SPS/PPS в кадрах — берём их из заголовка последовательности
+                if !has_nal(data, 7) {
+                    let _ = parser.frame_qp(&self.seq_header);
+                }
+                parser.frame_qp(data)
+            });
+            if let Some(q) = qp {
+                self.out_qp_sum.fetch_add(q.max(0) as u64, Ordering::Relaxed);
+                self.out_qp_n.fetch_add(1, Ordering::Relaxed);
+            }
             self.out_frames.fetch_add(1, Ordering::Relaxed);
             self.out_bytes.fetch_add(len as u64, Ordering::Relaxed);
             if key {
@@ -693,6 +739,24 @@ pub fn has_nal(data: &[u8], ty: u8) -> bool {
 /// Желаемый размер энкодера: (размер, с какого момента, уже сообщили).
 type WantSize = ((u32, u32), Instant, bool);
 
+/// Второй, «экономный» слой трансляции (свой simulcast): тот же захват, меньше размер и частота, свой энкодер и приёмник.
+pub struct LowLayer {
+    pub sink: Arc<dyn EncodedSink>,
+    pub cfg: CaptureConfig,
+    pub bitrate: u32,
+}
+
+struct LowEnc {
+    enc: Arc<MfEncoder>,
+    conv: Mutex<Sx<Converter>>,
+    sink: Arc<dyn EncodedSink>,
+    /// Кодировать каждый N-й кадр (60 → 30 к/с).
+    every: u32,
+    n: AtomicU32,
+    last: Mutex<Option<Sx<ID3D11Texture2D>>>,
+    events: Mutex<Option<JoinHandle<()>>>,
+}
+
 struct Shared {
     stop: AtomicBool,
     closed: AtomicBool,
@@ -710,6 +774,7 @@ struct Shared {
     /// Размер энкодера и желаемый размер по живым кадрам: (размер, с какого момента, уже сообщили).
     enc_size: (u32, u32),
     want_size: Mutex<Option<WantSize>>,
+    low: Option<LowEnc>,
 }
 
 pub struct HwCapture {
@@ -742,6 +807,11 @@ fn capture_item(source: SourceId) -> R<GraphicsCaptureItem> {
 impl HwCapture {
     /// Запуск аппаратного пути. Ошибка — значит, аппаратного кодирования нет (используйте программный путь).
     pub fn start(source: SourceId, cfg: CaptureConfig, bitrate: u32, sink: Arc<dyn EncodedSink>) -> R<HwCapture> {
+        Self::start_with_low(source, cfg, bitrate, sink, None)
+    }
+
+    /// То же, плюс экономный слой. Не поднялся второй энкодер — трансляция идёт без него.
+    pub fn start_with_low(source: SourceId, cfg: CaptureConfig, bitrate: u32, sink: Arc<dyn EncodedSink>, low: Option<LowLayer>) -> R<HwCapture> {
         if !GraphicsCaptureApi::is_supported().unwrap_or(false) {
             return Err("Захват экрана не поддерживается этой версией Windows".into());
         }
@@ -753,6 +823,32 @@ impl HwCapture {
         let fps = cfg.fps.clamp(1, 120);
         let enc = Arc::new(MfEncoder::new(&device, w, h, fps, bitrate)?);
         let conv = Converter::new(&device, &ctx, w, h, fps)?;
+        let low = low.and_then(|l| {
+            let (lw, lh) = target_size(size.Width.max(2) as u32, size.Height.max(2) as u32, &l.cfg);
+            let lfps = l.cfg.fps.clamp(1, fps);
+            if (lw, lh) == (w, h) && lfps == fps {
+                return None; // экономному слою нечего экономить
+            }
+            let made = MfEncoder::new(&device, lw, lh, lfps, l.bitrate).and_then(|enc| Ok((enc, Converter::new(&device, &ctx, lw, lh, lfps)?)));
+            match made {
+                Ok((enc, conv)) => {
+                    log::info!("экономный слой: {lw}×{lh} {lfps} к/с, до {} кбит/с", l.bitrate / 1000);
+                    Some(LowEnc {
+                        enc: Arc::new(enc),
+                        conv: Mutex::new(Sx(conv)),
+                        sink: l.sink,
+                        every: (fps / lfps).max(1),
+                        n: AtomicU32::new(0),
+                        last: Mutex::new(None),
+                        events: Mutex::new(None),
+                    })
+                }
+                Err(err) => {
+                    log::warn!("экономный слой не поднялся: {err} — только основной");
+                    None
+                }
+            }
+        });
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -767,11 +863,17 @@ impl HwCapture {
             repeats: AtomicU32::new(0),
             enc_size: (w, h),
             want_size: Mutex::new(None),
+            low,
         });
         let events = {
             let (enc, sink) = (enc.clone(), sink.clone());
             std::thread::Builder::new().name("mft-events".into()).spawn(move || enc.run_events(sink)).map_err(e("поток"))?
         };
+        if let Some(l) = &shared.low {
+            let (enc, sink) = (l.enc.clone(), l.sink.clone());
+            let h = std::thread::Builder::new().name("mft-events-low".into()).spawn(move || enc.run_events(sink)).map_err(e("поток"))?;
+            *l.events.lock().unwrap() = Some(h);
+        }
 
         let d3d = windows_capture::d3d11::create_direct3d_device(&device).map_err(e("IDirect3DDevice"))?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size)
@@ -847,13 +949,27 @@ impl HwCapture {
                         *want = Some((t, Instant::now(), false));
                     }
                 }
-                let nv12 = match shared.conv.lock().unwrap().0.convert(&tex, w, h) {
+                // Контекст устройства один на оба слоя — конвертируем под одним замком.
+                let mut conv = shared.conv.lock().unwrap();
+                let nv12 = match conv.0.convert(&tex, w, h) {
                     Ok(t) => t,
                     Err(err) => {
                         log::warn!("конвертация кадра: {err}");
                         return Ok(());
                     }
                 };
+                if let Some(l) = &shared.low
+                    && l.n.fetch_add(1, Ordering::Relaxed) % l.every == 0
+                {
+                    match l.conv.lock().unwrap().0.convert(&tex, w, h) {
+                        Ok(t) => {
+                            *l.last.lock().unwrap() = Some(Sx(t.clone()));
+                            l.enc.push(t, now_us(), l.sink.as_ref());
+                        }
+                        Err(err) => log::warn!("экономный слой: конвертация кадра: {err}"),
+                    }
+                }
+                drop(conv);
                 {
                     let mut last = shared.last.lock().unwrap();
                     let gap = last.1.elapsed();
@@ -907,6 +1023,18 @@ impl HwCapture {
             let _ = p.join();
         }
         self.shared.enc.shutdown();
+        if let Some(l) = &self.shared.low {
+            l.enc.shutdown();
+            if let Some(ev) = l.events.lock().unwrap().take() {
+                let t = Instant::now();
+                while !ev.is_finished() && t.elapsed() < Duration::from_millis(800) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if ev.is_finished() {
+                    let _ = ev.join();
+                }
+            }
+        }
         if let Some(ev) = self.events.take() {
             // Поток событий выходит по DrainComplete; если драйвер его не прислал — не виснем.
             let t = Instant::now();
@@ -980,6 +1108,10 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
         if key_wanted {
             shared.enc.force_key.store(true, Ordering::Relaxed);
         }
+        let low_key = shared.low.as_ref().is_some_and(|l| l.sink.take_keyframe_request());
+        if let Some(l) = shared.low.as_ref().filter(|_| low_key) {
+            l.enc.force_key.store(true, Ordering::Relaxed);
+        }
         if (idle >= REPEAT_EVERY || minimized) && (last_repeat.elapsed() >= REPEAT_EVERY || key_wanted) {
             last_repeat = Instant::now();
             // Свёрнутое окно: зритель видит последний живой кадр (заглушка — только если кадров ещё не было).
@@ -993,6 +1125,17 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
                 shared.enc.push(t, now_us(), shared.sink.as_ref());
                 shared.repeats.fetch_add(1, Ordering::Relaxed);
             }
+            if let Some(l) = &shared.low
+                && let Some(t) = l.last.lock().unwrap().as_ref().map(|t| t.0.clone())
+            {
+                l.enc.push(t, now_us(), l.sink.as_ref());
+            }
+        } else if low_key
+            && let Some(l) = &shared.low
+            && let Some(t) = l.last.lock().unwrap().as_ref().map(|t| t.0.clone())
+        {
+            // зритель экономного слоя попросил ключевой кадр, а картинка стоит — повторить сейчас
+            l.enc.push(t, now_us(), l.sink.as_ref());
         }
         if crate::diag::on() && diag_at.elapsed() >= Duration::from_secs(1) {
             let dt = diag_at.elapsed().as_secs_f64();
@@ -1002,12 +1145,19 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
             let out = shared.enc.out_frames.swap(0, Ordering::Relaxed);
             let keys = shared.enc.out_keys.swap(0, Ordering::Relaxed);
             let kbps = shared.enc.out_bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1000.0 / dt;
+            let qp_n = shared.enc.out_qp_n.swap(0, Ordering::Relaxed);
+            let qp_sum = shared.enc.out_qp_sum.swap(0, Ordering::Relaxed);
+            let qp = if qp_n > 0 { format!("{:.1}", qp_sum as f64 / qp_n as f64) } else { "?".into() };
             let (occ, chg) = match source {
                 SourceId::Window(h) => (if source.is_occluded() { "да" } else { "нет" }, screen.changed(h)),
                 SourceId::Monitor(_) => ("—", "—"),
             };
+            let low = shared.low.as_ref().map(|l| {
+                let kb = l.enc.out_bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1000.0 / dt;
+                format!(", экономный {} к/с {kb:.0} кбит/с (цель {})", l.enc.out_frames.swap(0, Ordering::Relaxed), l.enc.bitrate.load(Ordering::Relaxed) / 1000)
+            }).unwrap_or_default();
             log::info!(
-                "ДИАГ захват: живых {live}, повторов {rep}, из энкодера {out} (ключевых {keys}, {kbps:.0} кбит/с, цель {} кбит/с), без кадров {} мс, свёрнуто {}, перекрыто {occ}, экран под окном меняется {chg}, в фокусе «{}»",
+                "ДИАГ захват: живых {live}, повторов {rep}, из энкодера {out} (ключевых {keys}, {kbps:.0} кбит/с, цель {} кбит/с, QP {qp}), без кадров {} мс, свёрнуто {}, перекрыто {occ}, экран под окном меняется {chg}, в фокусе «{}»{low}",
                 shared.enc.bitrate.load(Ordering::Relaxed) / 1000,
                 idle.as_millis(),
                 if minimized { "да" } else { "нет" },

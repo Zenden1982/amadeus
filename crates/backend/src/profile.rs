@@ -12,12 +12,12 @@ use crate::{
 };
 
 pub(crate) async fn load_user(db: &sqlx::SqlitePool, id: i64) -> AppResult<User> {
-    let (id, name, is_admin, display_name, avatar): (i64, String, bool, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT id, name, is_admin, display_name, avatar_key FROM users WHERE id = ?")
+    let (id, name, is_admin, display_name, avatar, dm_from_servers): (i64, String, bool, Option<String>, Option<String>, bool) =
+        sqlx::query_as("SELECT id, name, is_admin, display_name, avatar_key, dm_from_servers FROM users WHERE id = ?")
             .bind(id)
             .fetch_one(db)
             .await?;
-    Ok(User { id, name, is_admin, display_name, avatar })
+    Ok(User { id, name, is_admin, display_name, avatar, dm_from_servers })
 }
 
 /// Все, кто делит с человеком хоть один сервер (и он сам).
@@ -28,8 +28,14 @@ async fn neighbours(db: &sqlx::SqlitePool, id: i64) -> AppResult<Vec<i64>> {
     .bind(id)
     .fetch_all(db)
     .await?;
-    // и друзья — они видят имя и аватар в списке друзей
-    for f in crate::friends::friend_ids(db, id).await? {
+    // и друзья — они видят имя и аватар в списке друзей; и собеседники в ЛС
+    let dms: Vec<i64> = sqlx::query_scalar(
+        "SELECT CASE WHEN user_a = ?1 THEN user_b ELSE user_a END FROM dm_channels WHERE user_a = ?1 OR user_b = ?1",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await?;
+    for f in crate::friends::friend_ids(db, id).await?.into_iter().chain(dms) {
         if !v.contains(&f) {
             v.push(f);
         }
@@ -52,8 +58,9 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
     Ok(Json(load_user(&state.inner.db, user.id).await?))
 }
 
-/// `PATCH /me` — отображаемое имя (пустая строка — сбросить).
+/// `PATCH /me` — отображаемое имя (пустая строка — сбросить), кто может писать в ЛС.
 pub async fn update(State(state): State<AppState>, user: AuthUser, ApiJson(req): ApiJson<UpdateMeRequest>) -> AppResult<Json<User>> {
+    let name_changed = req.display_name.is_some();
     if let Some(raw) = req.display_name {
         let name = raw.trim().to_string();
         if name.chars().count() > limits::DISPLAY_NAME_MAX || name.chars().any(char::is_control) {
@@ -64,6 +71,13 @@ pub async fn update(State(state): State<AppState>, user: AuthUser, ApiJson(req):
             .bind(user.id)
             .execute(&state.inner.db)
             .await?;
+    }
+    if let Some(open) = req.dm_from_servers {
+        sqlx::query("UPDATE users SET dm_from_servers = ? WHERE id = ?").bind(open).bind(user.id).execute(&state.inner.db).await?;
+        if !name_changed {
+            // имя и аватар не менялись — соседям рассылать нечего
+            return Ok(Json(load_user(&state.inner.db, user.id).await?));
+        }
     }
     changed(&state, user.id).await
 }

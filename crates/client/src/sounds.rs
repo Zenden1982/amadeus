@@ -25,6 +25,12 @@ pub enum Sound {
     ViewerJoin,
     /// Вашу трансляцию перестали смотреть.
     ViewerLeave,
+    /// Новое личное сообщение.
+    DirectMessage,
+    /// Входящий звонок (повторяется, пока звонит).
+    Ring,
+    /// Гудок у звонящего (повторяется, пока не ответили).
+    RingBack,
 }
 
 const RATE: u32 = 44_100;
@@ -82,6 +88,9 @@ struct Bank {
     stream_stop: Vec<u8>,
     viewer_join: Vec<u8>,
     viewer_leave: Vec<u8>,
+    direct_message: Vec<u8>,
+    ring: Vec<u8>,
+    ring_back: Vec<u8>,
 }
 
 /// Банк звуков для громкости `step` (шаг 5 %; 60 % = прежняя громкость). PlaySound с SND_ASYNC читает WAV, пока играет,
@@ -105,6 +114,12 @@ fn bank() -> &'static Bank {
         // зритель — короткий тихий «блик»
         viewer_join: build(&[(1174.66, 50), (1567.98, 90)], 0.11 * k),
         viewer_leave: build(&[(1567.98, 50), (1174.66, 90)], 0.11 * k),
+        // ЛС — две мягкие ноты вниз (ми–до), не путать с «бликом» зрителя
+        direct_message: build(&[(1318.51, 70), (1046.5, 130)], 0.14 * k),
+        // звонок — трель «до–ми–до–ми–соль», заметнее остальных звуков
+        ring: build(&[(1046.5, 110), (1318.51, 110), (1046.5, 110), (1318.51, 110), (1567.98, 260)], 0.2 * k),
+        // гудок у звонящего — один тихий долгий тон
+        ring_back: build(&[(440.0, 900)], 0.08 * k),
     }));
     banks.push((step, b));
     b
@@ -124,6 +139,9 @@ pub fn play(s: Sound) {
         Sound::StreamStop => &b.stream_stop,
         Sound::ViewerJoin => &b.viewer_join,
         Sound::ViewerLeave => &b.viewer_leave,
+        Sound::DirectMessage => &b.direct_message,
+        Sound::Ring => &b.ring,
+        Sound::RingBack => &b.ring_back,
     };
     #[cfg(windows)]
     unsafe {
