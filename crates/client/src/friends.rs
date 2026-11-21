@@ -212,6 +212,7 @@ impl Friends {
     }
 
     /// Отладка (скриншоты): открыть окно сразу, `requests` / `all` — на этой вкладке.
+    #[cfg(debug_assertions)]
     pub fn debug_open(&mut self, tab: &str) {
         self.open = true;
         self.tab = match tab {

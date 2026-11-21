@@ -27,6 +27,7 @@ pub enum ThemePref {
     Light,
 }
 
+#[cfg_attr(not(debug_assertions), allow(dead_code))] // галерея (только отладка)
 impl ThemePref {
     pub const ALL: [ThemePref; 3] = [ThemePref::System, ThemePref::Dark, ThemePref::Light];
 
