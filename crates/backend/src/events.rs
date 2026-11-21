@@ -72,6 +72,8 @@ struct Feed {
     state: AppState,
     me: i64,
     servers: HashSet<i64>,
+    /// Пока поток жив — человек «в сети» для друзей.
+    _online: crate::friends::OnlineGuard,
 }
 
 /// `GET /events` — поток событий (SSE). Первое событие — `hello`; при отставании — `resync`.
@@ -80,7 +82,8 @@ pub async fn events(State(state): State<AppState>, user: AuthUser) -> Response {
     let mut shutdown = state.inner.shutdown.subscribe();
     let servers = my_servers(&state, user.id).await;
     tracing::debug!(user_id = user.id, "events stream opened");
-    let feed = Feed { rx, state, me: user.id, servers };
+    let online = crate::friends::OnlineGuard::new(&state, user.id);
+    let feed = Feed { rx, state, me: user.id, servers, _online: online };
     let live = futures_util::stream::unfold(feed, |mut f| async move {
         loop {
             match f.rx.recv().await {

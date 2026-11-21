@@ -411,6 +411,8 @@ fn mur_strokes() -> Vec<Vec<(f32, f32)>> {
 pub struct MarkPose {
     pub blink: f32,
     pub ears: f32,
+    /// Спит (все друзья не в сети): глаза — дуги.
+    pub sleep: bool,
 }
 
 /// Знак + надпись «murmur» (лого бренда): первая половина — цвет текста, вторая — акцент («мур-мур»).
@@ -431,7 +433,17 @@ pub fn paint_lockup_pose(painter: &egui::Painter, left_top: Pos2, height: f32, l
     round_stroke(painter, &line, MARK.width * s, mark_c);
     let r = MARK.eye_r * s;
     for e in MARK.eyes {
-        if pose.blink > 0.01 {
+        if pose.sleep {
+            // закрытые глаза — дуга вниз
+            let c = map(e);
+            let pts: Vec<Pos2> = (0..=8)
+                .map(|i| {
+                    let a = std::f32::consts::PI * i as f32 / 8.0;
+                    c + vec2(-a.cos() * r * 1.3, a.sin() * r * 0.8 - r * 0.2)
+                })
+                .collect();
+            round_stroke(painter, &pts, (r * 0.75).max(1.0), mark_c);
+        } else if pose.blink > 0.01 {
             painter.add(egui::Shape::ellipse_filled(map(e), vec2(r, (r * (1.0 - 0.85 * pose.blink)).max(0.6)), mark_c));
         } else {
             painter.circle_filled(map(e), r, mark_c);

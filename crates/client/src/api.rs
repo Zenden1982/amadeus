@@ -240,6 +240,24 @@ impl Api {
         Self::decode(req.send().await.map_err(ApiError::network)?).await
     }
 
+    pub async fn friends(&self) -> ApiResult<proto::FriendsList> {
+        self.call::<(), _>(Method::GET, "/friends", None).await
+    }
+
+    /// Заявка в друзья по логину (встречная заявка — сразу дружба).
+    pub async fn add_friend(&self, name: &str) -> ApiResult<proto::FriendsList> {
+        self.call(Method::POST, "/friends/requests", Some(&proto::AddFriendRequest { name: name.to_string() })).await
+    }
+
+    pub async fn accept_friend(&self, id: i64) -> ApiResult<proto::FriendsList> {
+        self.call::<(), _>(Method::POST, &format!("/friends/{id}/accept"), None).await
+    }
+
+    /// Удалить из друзей / отклонить / отменить заявку.
+    pub async fn remove_friend(&self, id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/friends/{id}"), None).await
+    }
+
     pub async fn delete_avatar(&self) -> ApiResult<User> {
         self.call::<(), _>(Method::DELETE, "/me/avatar", None).await
     }

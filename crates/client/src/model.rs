@@ -183,7 +183,11 @@ impl Model {
                     }
                 }
             }
-            ServerEvent::MessageCreated { .. } | ServerEvent::Hello | ServerEvent::Resync => {}
+            ServerEvent::MessageCreated { .. }
+            | ServerEvent::Hello
+            | ServerEvent::Resync
+            | ServerEvent::FriendsChanged
+            | ServerEvent::Presence { .. } => {}
         }
     }
 

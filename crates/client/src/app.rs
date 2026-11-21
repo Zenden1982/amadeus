@@ -146,6 +146,7 @@ pub struct App {
     chat: Chat,
     /// Имена и аватары.
     people: People,
+    friends: crate::friends::Friends,
     /// Настройки → Профиль: поле имени, идёт сохранение, ошибка.
     profile_name: String,
     profile_busy: bool,
@@ -212,6 +213,7 @@ impl App {
         let video = VideoHub::new(&ctx);
         let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
         let people = People::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let friends = crate::friends::Friends::new(rt.handle().clone(), ctx.clone(), api.clone());
         let servers = ServersUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let channel_list = ChannelsUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let server_settings = crate::server_settings::ServerSettings::new(rt.handle().clone(), ctx.clone(), api.clone());
@@ -285,6 +287,7 @@ impl App {
             watch_pending: None,
             chat,
             people,
+            friends,
             profile_name: String::new(),
             profile_busy: false,
             profile_error: None,
@@ -320,6 +323,10 @@ impl App {
         #[cfg(debug_assertions)]
         if std::env::var_os("AMADEUS_OPEN_SETTINGS").is_some() {
             app.open_settings();
+        }
+        #[cfg(debug_assertions)]
+        if let Ok(tab) = std::env::var("AMADEUS_OPEN_FRIENDS") {
+            app.friends.debug_open(&tab);
         }
         app
     }
@@ -478,6 +485,7 @@ impl App {
         self.api = api.clone();
         self.chat.set_api(api.clone());
         self.people.set_api(api.clone());
+        self.friends.set_api(api.clone());
         self.servers.set_api(api.clone());
         self.channel_list.set_api(api.clone());
         self.server_settings.set_api(api.clone());
@@ -882,7 +890,7 @@ impl App {
         };
         match text_channel {
             Some(ch) => {
-                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open();
+                let modal = self.friends.open || self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open();
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal, &self.people);
                 });
@@ -896,6 +904,7 @@ impl App {
         self.ui_banner(ui, &vs);
         self.ui_volume_popup(ui, &vs);
         self.servers.dialogs(ui.ctx());
+        self.friends.ui(ui.ctx(), &self.people);
         self.channel_list.dialogs(ui.ctx());
         self.server_settings.ui(ui.ctx(), &self.model, &self.people);
         self.ui_avatar_crop(ui.ctx());
@@ -1070,6 +1079,15 @@ impl App {
             .frame(Frame::new().fill(t::p().rail))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(12.0);
+                        if crate::friends::rail_button(ui, self.friends.incoming(), self.friends.open) {
+                            self.friends.open = true;
+                        }
+                        ui.add_space(6.0);
+                        let (r, _) = ui.allocate_exact_size(vec2(32.0, 2.0), Sense::hover());
+                        ui.painter().hline(r.x_range(), r.center().y, Stroke::new(2.0, t::p().border));
+                    });
                     if let Some(id) = self.servers.column(ui, &self.model, &self.people) {
                         self.select_server(id);
                     }
@@ -2684,6 +2702,7 @@ impl eframe::App for App {
             self.people.learn(u);
         }
         for e in self.chat.take_events() {
+            self.friends.on_event(&e);
             if matches!(e, proto::ServerEvent::Hello | proto::ServerEvent::Resync) {
                 // поток (пере)открылся — дочитать, что могли пропустить
                 if self.screen == Screen::Main && !self.demo {
@@ -2699,6 +2718,10 @@ impl eframe::App for App {
                 self.servers.reload_one(server.clone());
             }
         }
+        if self.friends.poll(&mut self.people) {
+            crate::sounds::play(crate::sounds::Sound::ViewerJoin);
+        }
+        crate::frame::set_cat_asleep(self.friends.all_offline());
         self.channel_list.poll(&mut self.model);
         self.server_settings.poll();
         let out = self.servers.poll(&mut self.model, &mut self.people);

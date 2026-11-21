@@ -38,6 +38,10 @@ pub mod limits {
     /// Аватар / иконка сервера: размер файла и сторона квадрата.
     pub const IMAGE_PROFILE_MAX_BYTES: usize = 1024 * 1024;
     pub const IMAGE_PROFILE_MAX_SIDE: u32 = 512;
+    /// Неотвеченных исходящих заявок в друзья.
+    pub const FRIEND_REQUESTS_PENDING_MAX: usize = 50;
+    /// Друзей у одного человека.
+    pub const FRIENDS_MAX: usize = 500;
 }
 
 /// Права на сервере — битовая маска (`Role::permissions`).
@@ -470,6 +474,41 @@ pub enum ServerEvent {
     Voice { server_id: i64, roster: VoiceRoster },
     /// Сменилось отображаемое имя или аватар.
     UserUpdated { user: PublicUser },
+    /// Изменились мои друзья или заявки — перечитать `GET /friends`.
+    FriendsChanged,
+    /// Друг появился в сети или вышел (открыт ли у него поток событий).
+    Presence { user_id: i64, online: bool },
+}
+
+/// Друг (заявка принята).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Friend {
+    pub user: PublicUser,
+    /// В сети: клиент запущен и вошёл.
+    pub online: bool,
+}
+
+/// Заявка в друзья (входящая или исходящая).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendRequest {
+    pub user: PublicUser,
+    pub created_at: i64,
+}
+
+/// `GET /friends`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendsList {
+    pub friends: Vec<Friend>,
+    /// Мне прислали.
+    pub incoming: Vec<FriendRequest>,
+    /// Я отправил, ещё не приняли.
+    pub outgoing: Vec<FriendRequest>,
+}
+
+/// `POST /friends/requests` — заявка по логину.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddFriendRequest {
+    pub name: String,
 }
 
 /// Тело любого ответа с ошибкой.
@@ -513,6 +552,9 @@ mod tests {
         .unwrap();
         assert!(matches!(e, ServerEvent::MessageCreated { message } if message.attachments.is_empty()));
         assert!(serde_json::from_str::<ServerEvent>(r#"{"type":"future_thing"}"#).is_err());
+        assert_eq!(serde_json::to_string(&ServerEvent::FriendsChanged).unwrap(), r#"{"type":"friends_changed"}"#);
+        let p: ServerEvent = serde_json::from_str(r#"{"type":"presence","user_id":3,"online":true}"#).unwrap();
+        assert_eq!(p, ServerEvent::Presence { user_id: 3, online: true });
     }
 
     #[test]

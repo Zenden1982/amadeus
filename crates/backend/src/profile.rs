@@ -28,6 +28,12 @@ async fn neighbours(db: &sqlx::SqlitePool, id: i64) -> AppResult<Vec<i64>> {
     .bind(id)
     .fetch_all(db)
     .await?;
+    // и друзья — они видят имя и аватар в списке друзей
+    for f in crate::friends::friend_ids(db, id).await? {
+        if !v.contains(&f) {
+            v.push(f);
+        }
+    }
     if !v.contains(&id) {
         v.push(id);
     }

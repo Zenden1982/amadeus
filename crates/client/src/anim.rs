@@ -77,6 +77,11 @@ pub fn speech_wave() -> bool {
     speech() == SpeechIndicator::Wave && level() != AnimPref::Off
 }
 
+/// Настройка «Живой кот» включена и анимации не выключены (статичные позы — например, «спит» — можно рисовать и в фоне).
+pub fn live_cat_enabled() -> bool {
+    LIVE_CAT.load(Relaxed) && level() != AnimPref::Off
+}
+
 /// Живой кот в заголовке окна.
 pub fn live_cat(ctx: &egui::Context) -> bool {
     LIVE_CAT.load(Relaxed) && decor(ctx)

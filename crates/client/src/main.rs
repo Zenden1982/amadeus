@@ -12,6 +12,7 @@ mod crop;
 mod denoise;
 mod desktop;
 mod frame;
+mod friends;
 #[cfg(debug_assertions)]
 mod gallery;
 mod kit;

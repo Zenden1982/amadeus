@@ -279,6 +279,13 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
     badge_clicked
 }
 
+/// Все друзья не в сети — кот в заголовке спит (выставляет приложение каждый кадр).
+static CAT_ASLEEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_cat_asleep(on: bool) {
+    CAT_ASLEEP.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Когда кто-то зашёл в канал — уши кота в заголовке приподнимаются (~300 мс).
 static EARS_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
@@ -291,6 +298,10 @@ pub fn perk_ears() {
 fn cat_pose(ctx: &egui::Context) -> t::MarkPose {
     use std::time::Duration;
     const BLINK: f64 = 0.15;
+    // спит (все друзья не в сети) — статично, без перерисовок; видно и когда окно не в фокусе
+    if crate::anim::live_cat_enabled() && CAT_ASLEEP.load(std::sync::atomic::Ordering::Relaxed) {
+        return t::MarkPose { sleep: true, ..Default::default() };
+    }
     if !crate::anim::live_cat(ctx) {
         return t::MarkPose::default();
     }

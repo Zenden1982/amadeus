@@ -10,6 +10,7 @@ mod channels;
 pub mod chat;
 mod db;
 pub mod events;
+mod friends;
 mod images;
 mod invites;
 mod profile;
@@ -68,6 +69,8 @@ pub struct Inner {
     pub rooms: Arc<dyn voice::Rooms>,
     /// Кто сейчас в голосовых каналах.
     pub presence: voice::Presence,
+    /// Кто в сети (открыт поток событий) — для друзей.
+    pub online: friends::Online,
     /// true — сервис останавливается: потоки SSE закрываются (иначе graceful shutdown ждал бы их вечно).
     pub shutdown: watch::Sender<bool>,
 }
@@ -111,6 +114,7 @@ impl AppState {
                 events: broadcast::channel(256).0,
                 rooms: Arc::new(voice::NoRooms),
                 presence: voice::Presence::default(),
+                online: friends::Online::default(),
                 shutdown: watch::channel(false).0,
             }),
         }
